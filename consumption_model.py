@@ -1,0 +1,405 @@
+"""
+consumption_model.py — Dinaminis namų suvartojimo modelis
+==========================================================
+Naudoja ESO istorinius duomenis ir HA statistiką
+tikslesniam suvartojimo prognozavimui.
+
+Vietoj statinio 8 kWh per dieną — dinaminis modelis
+kuris atsižvelgia į:
+  - Savaitės dieną (pirmadieniais daugiau, šeštadieniais mažiau)
+  - Sezoną (žiemą daugiau, vasarą mažiau)
+  - Valandą (rytas/vakaras — pikai)
+
+ESO duomenų importas:
+  1. Parsisiųsk CSV iš eso.lt (Mano ESO → Suvartojimas)
+  2. Nukopijuok į /config/appdaemon/apps/eso_data.csv
+  3. Skriptas automatiškai importuos
+
+CSV formatas (ESO eksportas):
+  Data;Laikas;Suvartojimas (kWh)
+  2024-01-01;00:00;0.245
+  2024-01-01;01:00;0.198
+  ...
+"""
+
+import appdaemon.plugins.hass.hassapi as hass
+from datetime import datetime, timedelta
+import json
+import os
+import csv
+from collections import defaultdict
+
+
+# ============================================================
+#  KONFIGŪRACIJA
+# ============================================================
+
+ESO_CSV_FILE    = "/config/appdaemon/apps/eso_data.csv"
+MODEL_FILE      = "/config/appdaemon/apps/consumption_model.json"
+
+# Numatytieji koeficientai kol nėra duomenų
+DEFAULT_DAILY_KWH = 8.0
+
+DEFAULT_WEEKDAY_FACTORS = {
+    0: 1.15,   # Pirmadienis
+    1: 1.10,   # Antradienis
+    2: 1.10,   # Trečiadienis
+    3: 1.10,   # Ketvirtadienis
+    4: 1.05,   # Penktadienis
+    5: 0.85,   # Šeštadienis
+    6: 0.90,   # Sekmadienis
+}
+
+DEFAULT_SEASON_FACTORS = {
+    "žiema":     1.35,
+    "pavasaris": 0.95,
+    "vasara":    0.80,
+    "ruduo":     1.05,
+}
+
+SENSOR = {
+    "house_load": "sensor.solis_house_load",
+    "season":     "input_select.energy_season",
+}
+
+
+# ============================================================
+#  KLASĖ
+# ============================================================
+
+class ConsumptionModel(hass.Hass):
+
+    def initialize(self):
+        self.log("ConsumptionModel paleidžiamas...")
+
+        self.model = self.load_model()
+        self.daily_readings = []
+
+        # Importuoti ESO duomenis jei failas egzistuoja
+        if os.path.exists(ESO_CSV_FILE):
+            self.import_eso_data()
+
+        # Kaupti realiojo laiko duomenis — kas 15 min
+        self.run_every(self.collect_reading, "now", 15 * 60)
+
+        # Atnaujinti modelį — kas dieną 00:05
+        self.run_daily(self.update_model, "00:05:00")
+
+        # Eksponuoti sensorių į HA
+        self.run_every(self.update_ha_sensors, "now+30", 30 * 60)
+
+        self.log("ConsumptionModel paleistas.")
+
+    # ============================================================
+    #  MODELIO ĮKĖLIMAS / IŠSAUGOJIMAS
+    # ============================================================
+
+    def load_model(self):
+        """Įkelia modelį iš failo arba naudoja default."""
+        try:
+            if os.path.exists(MODEL_FILE):
+                with open(MODEL_FILE, "r") as f:
+                    model = json.load(f)
+                    self.log(f"Modelis įkeltas. Duomenų dienų: {model.get('data_days', 0)}")
+                    return model
+        except Exception as e:
+            self.log(f"Modelio įkėlimo klaida: {e}")
+
+        return {
+            "daily_avg":        DEFAULT_DAILY_KWH,
+            "weekday_factors":  DEFAULT_WEEKDAY_FACTORS,
+            "season_factors":   DEFAULT_SEASON_FACTORS,
+            "hourly_profile":   self.default_hourly_profile(),
+            "data_days":        0,
+            "updated":          None,
+        }
+
+    def save_model(self):
+        """Išsaugo modelį į failą."""
+        try:
+            self.model["updated"] = datetime.now().isoformat()
+            with open(MODEL_FILE, "w") as f:
+                json.dump(self.model, f, indent=2)
+            self.log("Modelis išsaugotas.")
+        except Exception as e:
+            self.log(f"Modelio išsaugojimo klaida: {e}")
+
+    def default_hourly_profile(self):
+        """Numatytasis valandinis profilis (normalizuotas)."""
+        # Tipiškas Lietuvos namų ūkio profilis
+        profile = {
+            "0": 0.6, "1": 0.5, "2": 0.5, "3": 0.5,
+            "4": 0.5, "5": 0.6, "6": 0.8, "7": 1.2,
+            "8": 1.3, "9": 1.1, "10": 1.0, "11": 0.9,
+            "12": 1.0, "13": 0.9, "14": 0.8, "15": 0.9,
+            "16": 1.1, "17": 1.4, "18": 1.6, "19": 1.5,
+            "20": 1.4, "21": 1.2, "22": 1.0, "23": 0.8,
+        }
+        return profile
+
+    # ============================================================
+    #  ESO DUOMENŲ IMPORTAS
+    # ============================================================
+
+    def import_eso_data(self):
+        """
+        Importuoja ESO istorinius duomenis iš CSV failo.
+        Apskaičiuoja dieninius vidurkius ir savaitės koeficientus.
+        """
+        self.log(f"Importuojami ESO duomenys iš {ESO_CSV_FILE}...")
+
+        daily_totals    = defaultdict(float)
+        daily_counts    = defaultdict(int)
+        hourly_totals   = defaultdict(float)
+        hourly_counts   = defaultdict(int)
+
+        rows_read = 0
+        errors    = 0
+
+        try:
+            with open(ESO_CSV_FILE, "r", encoding="utf-8-sig") as f:
+                # Pabandyti nustatyti separatorių automatiškai
+                sample = f.read(1024)
+                f.seek(0)
+                delimiter = ";" if ";" in sample else ","
+
+                reader = csv.DictReader(f, delimiter=delimiter)
+
+                for row in reader:
+                    try:
+                        # Lankstus stulpelių pavadinimų apdorojimas
+                        date_str = (
+                            row.get("Data") or
+                            row.get("Date") or
+                            row.get("date") or
+                            list(row.values())[0]
+                        ).strip()
+
+                        time_str = (
+                            row.get("Laikas") or
+                            row.get("Time") or
+                            row.get("time") or
+                            list(row.values())[1]
+                        ).strip()
+
+                        kwh_str = (
+                            row.get("Suvartojimas (kWh)") or
+                            row.get("kWh") or
+                            row.get("consumption") or
+                            list(row.values())[2]
+                        ).strip().replace(",", ".")
+
+                        dt  = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
+                        kwh = float(kwh_str)
+
+                        day_key     = dt.date().isoformat()
+                        weekday     = str(dt.weekday())
+                        hour        = str(dt.hour)
+
+                        daily_totals[day_key]  += kwh
+                        daily_counts[day_key]  += 1
+                        hourly_totals[hour]    += kwh
+                        hourly_counts[hour]    += 1
+                        rows_read += 1
+
+                    except (ValueError, KeyError, IndexError):
+                        errors += 1
+                        continue
+
+        except Exception as e:
+            self.log(f"ESO failo skaitymo klaida: {e}", level="ERROR")
+            return
+
+        if not daily_totals:
+            self.log("ESO duomenų nepavyko perskaityti.", level="WARNING")
+            return
+
+        self.log(f"ESO: {rows_read} eilutės, {len(daily_totals)} dienos, {errors} klaidos")
+
+        # Dienos vidurkis
+        complete_days = {k: v for k, v in daily_totals.items() if daily_counts[k] >= 20}
+        if complete_days:
+            avg = sum(complete_days.values()) / len(complete_days)
+            self.model["daily_avg"] = round(avg, 2)
+            self.model["data_days"] = len(complete_days)
+            self.log(f"Dienos vidurkis iš ESO: {avg:.2f} kWh ({len(complete_days)} dienų)")
+
+        # Savaitės koeficientai
+        weekday_totals  = defaultdict(list)
+        for day_str, total in complete_days.items():
+            dt      = datetime.strptime(day_str, "%Y-%m-%d")
+            weekday = str(dt.weekday())
+            weekday_totals[weekday].append(total)
+
+        weekday_avgs = {}
+        for wd, vals in weekday_totals.items():
+            weekday_avgs[wd] = sum(vals) / len(vals)
+
+        if weekday_avgs:
+            overall_avg = sum(weekday_avgs.values()) / len(weekday_avgs)
+            factors = {wd: round(avg / overall_avg, 3) for wd, avg in weekday_avgs.items()}
+            self.model["weekday_factors"] = factors
+            self.log(f"Savaitės koeficientai atnaujinti iš ESO duomenų.")
+
+        # Valandinis profilis
+        if hourly_counts:
+            hour_avgs = {
+                h: hourly_totals[h] / hourly_counts[h]
+                for h in hourly_totals
+            }
+            overall_hour_avg = sum(hour_avgs.values()) / len(hour_avgs)
+            profile = {
+                h: round(avg / overall_hour_avg, 3)
+                for h, avg in hour_avgs.items()
+            }
+            self.model["hourly_profile"] = profile
+            self.log("Valandinis profilis atnaujintas iš ESO duomenų.")
+
+        # Sezoniniai koeficientai iš ESO duomenų
+        season_totals  = defaultdict(list)
+        for day_str, total in complete_days.items():
+            month  = datetime.strptime(day_str, "%Y-%m-%d").month
+            season = self.month_to_season(month)
+            season_totals[season].append(total)
+
+        if len(season_totals) >= 2:
+            season_avgs = {s: sum(v) / len(v) for s, v in season_totals.items()}
+            overall_s   = sum(season_avgs.values()) / len(season_avgs)
+            s_factors   = {s: round(avg / overall_s, 3) for s, avg in season_avgs.items()}
+            self.model["season_factors"] = s_factors
+            self.log(f"Sezoniniai koeficientai atnaujinti: {s_factors}")
+
+        self.save_model()
+        self.log("ESO importas baigtas sėkmingai.")
+
+    def month_to_season(self, month):
+        if month in (12, 1, 2):   return "žiema"
+        elif month in (3, 4, 5):  return "pavasaris"
+        elif month in (6, 7, 8):  return "vasara"
+        else:                     return "ruduo"
+
+    # ============================================================
+    #  PROGNOZAVIMAS
+    # ============================================================
+
+    def predict_daily(self, date=None, season=None):
+        """
+        Prognozuoja dienos suvartojimą kWh.
+        Naudoja savaitės dienos ir sezono koeficientus.
+        """
+        if date is None:
+            date = datetime.now().date()
+
+        if season is None:
+            season = self.get_current_season()
+
+        weekday = str(date.weekday())
+
+        weekday_factor = self.model["weekday_factors"].get(weekday, 1.0)
+        season_factor  = self.model["season_factors"].get(season, 1.0)
+
+        prediction = self.model["daily_avg"] * weekday_factor * season_factor
+        return round(prediction, 2)
+
+    def predict_remaining_today(self):
+        """Prognozuoja likusį suvartojimą šiandien kWh."""
+        now          = datetime.now()
+        current_hour = now.hour
+        profile      = self.model.get("hourly_profile", self.default_hourly_profile())
+
+        # Suma likusių valandų koeficientų
+        remaining_factor = sum(
+            float(profile.get(str(h), 1.0))
+            for h in range(current_hour, 24)
+        )
+        total_factor = sum(float(v) for v in profile.values())
+
+        daily_pred  = self.predict_daily()
+        remaining   = daily_pred * (remaining_factor / total_factor)
+        return round(remaining, 2)
+
+    def predict_tomorrow(self):
+        """Prognozuoja rytojaus suvartojimą kWh."""
+        tomorrow = datetime.now().date() + timedelta(days=1)
+        return self.predict_daily(date=tomorrow)
+
+    def get_current_season(self):
+        """Grąžina dabartinį sezoną."""
+        try:
+            season = self.get_state(SENSOR["season"])
+            if season in self.model.get("season_factors", {}):
+                return season
+        except Exception:
+            pass
+        return self.month_to_season(datetime.now().month)
+
+    # ============================================================
+    #  REALIŲ DUOMENŲ KAUPIMAS
+    # ============================================================
+
+    def collect_reading(self, kwargs):
+        """Renka realiojo laiko duomenis kas 15 min."""
+        try:
+            load_w = float(self.get_state(SENSOR["house_load"]) or 0)
+            load_kwh = load_w / 1000 * (15 / 60)  # kWh per 15 min
+
+            self.daily_readings.append({
+                "hour":  datetime.now().hour,
+                "kwh":   round(load_kwh, 4),
+            })
+        except Exception:
+            pass
+
+    def update_model(self, kwargs):
+        """
+        Atnaujina modelį su vakardienos realiais duomenimis.
+        Veikia kas dieną 00:05.
+        """
+        if not self.daily_readings:
+            return
+
+        yesterday_total = sum(r["kwh"] for r in self.daily_readings)
+        yesterday       = (datetime.now() - timedelta(days=1)).date()
+        weekday         = str(yesterday.weekday())
+        season          = self.month_to_season(yesterday.month)
+
+        self.log(
+            f"[MODEL] Vakar suvartotas: {yesterday_total:.2f} kWh "
+            f"(savaitės diena: {weekday}, sezonas: {season})"
+        )
+
+        # Atnaujinti dienos vidurkį su exponentiniu glodinimo filtru (α=0.1)
+        alpha = 0.1
+        old_avg = self.model["daily_avg"]
+        new_avg = old_avg * (1 - alpha) + yesterday_total * alpha
+        self.model["daily_avg"] = round(new_avg, 3)
+
+        self.model["data_days"] = self.model.get("data_days", 0) + 1
+        self.save_model()
+        self.daily_readings = []
+
+    # ============================================================
+    #  HA SENSORIAI
+    # ============================================================
+
+    def update_ha_sensors(self, kwargs):
+        """Eksponuoja prognozės sensoriaus reikšmes į HA."""
+        remaining = self.predict_remaining_today()
+        tomorrow  = self.predict_tomorrow()
+        daily     = self.predict_daily()
+
+        self.set_state(
+            "sensor.consumption_remaining_today",
+            state=remaining,
+            attributes={"unit_of_measurement": "kWh", "friendly_name": "Likusis suvartojimas šiandien"}
+        )
+        self.set_state(
+            "sensor.consumption_forecast_tomorrow",
+            state=tomorrow,
+            attributes={"unit_of_measurement": "kWh", "friendly_name": "Rytojaus suvartojimo prognozė"}
+        )
+        self.set_state(
+            "sensor.consumption_daily_avg",
+            state=daily,
+            attributes={"unit_of_measurement": "kWh", "friendly_name": "Dienos suvartojimo vidurkis"}
+        )

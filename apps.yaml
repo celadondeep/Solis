@@ -1,0 +1,126 @@
+# ============================================================
+# apps.yaml — AppDaemon konfigūracija
+# ============================================================
+# Nukopijuoti į: /config/appdaemon/apps/apps.yaml
+
+energy_manager:
+  module: energy_manager
+  class: EnergyManager
+
+battery_health:
+  module: battery_health
+  class: BatteryHealth
+
+consumption_model:
+  module: consumption_model
+  class: ConsumptionModel
+
+# ML modelis aktyvuoti TIK po 60+ dienų duomenų kaupimo!
+# ml_consumption:
+#   module: ml_model
+#   class: MLConsumptionModel
+
+---
+# ============================================================
+# README — Diegimo instrukcija
+# ============================================================
+#
+# 1. FAILŲ NUKOPIJYAVIMAS
+#    Nukopijuoti visus .py failus į:
+#    /config/appdaemon/apps/
+#
+#    energy_manager.py    — pagrindinis valdymo skriptas
+#    battery_health.py    — kaupiklio sveikata
+#    consumption_model.py — suvartojimo modelis
+#    ml_model.py          — ML modelis (vėliau)
+#    apps.yaml            — ši konfigūracija
+#
+# 2. SENSORIŲ SUDERINIMAS
+#    Pakeisti sensorių pavadinimus pagal savo solis_modbus integraciją.
+#    Patikrinti Developer Tools → States ir surasti tikslus pavadinimus.
+#
+#    Svarbiausi sensoriai:
+#    sensor.solis_battery_soc
+#    sensor.solis_pv_power
+#    sensor.solis_house_load
+#    sensor.solis_grid_power
+#    sensor.solcast_forecast_remaining_today
+#    sensor.solcast_forecast_tomorrow
+#    sensor.boiler_temperature
+#    switch.boiler_switch
+#
+# 3. HELPER OBJEKTAI HOME ASSISTANT
+#    Sukurti šiuos helper objektus (Settings → Helpers):
+#
+#    input_select.energy_season
+#      Opcijos: žiema, pavasaris, vasara, ruduo
+#
+#    input_boolean.storm_mode
+#      Pavadinimas: Audros / ESO režimas
+#
+# 4. UTILITY METERS (savaitinei ataskaitai)
+#    Pridėti į configuration.yaml:
+#
+#    utility_meter:
+#      energy_pv_week:
+#        source: sensor.solis_today_pv_generation
+#        cycle: weekly
+#      energy_grid_buy_week:
+#        source: sensor.solis_today_energy_purchased
+#        cycle: weekly
+#      energy_grid_sell_week:
+#        source: sensor.solis_today_energy_sold
+#        cycle: weekly
+#      energy_house_week:
+#        source: sensor.solis_today_energy_consumption
+#        cycle: weekly
+#      energy_boiler_week:
+#        source: sensor.boiler_energy_today
+#        cycle: weekly
+#
+# 5. PRANEŠIMAI
+#    Pakeisti "notify/telegram" į savo servisą:
+#    - Telegram: notify/telegram
+#    - Callmebot (Facebook): notify/callmebot_facebook
+#
+# 6. ESO DUOMENŲ IMPORTAS
+#    a) Eiti į eso.lt → Mano ESO → Suvartojimo istorija
+#    b) Eksportuoti CSV (visa metų istorija)
+#    c) Nukopijuoti failą į:
+#       /config/appdaemon/apps/eso_data.csv
+#    d) Perkrauti AppDaemon — importas įvyks automatiškai
+#
+# 7. ML MODELIS (po 60 dienų)
+#    a) Įdiegti bibliotekas:
+#       pip install scikit-learn numpy --break-system-packages
+#    b) Atkomentiruoti ml_consumption apps.yaml
+#    c) Perkrauti AppDaemon
+#
+# 8. SOLCAST KONFIGŪRACIJA
+#    Solcast integracija HACS:
+#    - Azimuth: paneliukų kryptis (0=N, 90=E, 180=S, 270=W)
+#    - Tilt: paneliukų kampas nuo horizontalės (°)
+#    - kWp: 5.34
+#    - Registruotis: solcast.com (nemokama iki 10 užklausų/dieną)
+#
+# ============================================================
+# SKRIPTŲ PRIKLAUSOMYBĖS
+# ============================================================
+#
+#  energy_manager.py
+#    └── naudoja consumption_model.py sensorius (jei aktyvus)
+#    └── naudoja ml_model.py sensorius (jei aktyvus)
+#
+#  consumption_model.py
+#    └── eksponuoja: sensor.consumption_remaining_today
+#    └── eksponuoja: sensor.consumption_forecast_tomorrow
+#
+#  ml_model.py
+#    └── eksponuoja: sensor.ml_consumption_tomorrow
+#    └── eksponuoja: sensor.ml_consumption_remaining
+#    └── eksponuoja: sensor.ml_accuracy_yesterday
+#
+# energy_manager.py automatiškai naudos ML sensorius
+# kai jie bus prieinami, kitaip — consumption_model sensorius.
+#
+# ============================================================
