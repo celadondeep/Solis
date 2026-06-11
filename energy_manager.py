@@ -40,7 +40,10 @@ import statistics
 # ============================================================
 
 # Sistemos parametrai
-BATTERY_CAPACITY_KWH = 16.0       # kaupiklio talpa kWh
+# Naudingoji talpa suderinta su automations.yaml/configuration.yaml:
+# 14.2 kWh tenka SOC ruožui 100%→11% (dugnas 11%), 1% SOC = 0.15955 kWh.
+BATTERY_USABLE_KWH   = 14.2       # naudingoji kaupiklio talpa kWh (100%→11%)
+KWH_PER_SOC          = BATTERY_USABLE_KWH / 89.0   # kWh viename SOC %
 BOILER_POWER_KW      = 2.2        # boilerio galia kW
 ESO_EXPORT_LIMIT_KW  = 1.0        # max atidavimas į tinklą kW
 
@@ -68,20 +71,35 @@ SURPLUS_MIN_KW       = 0.3    # minimalus perteklius kad boileris veiktų
 
 # HA sensorių pavadinimai
 SENSOR = {
-    "solcast_today":     "sensor.solcast_forecast_remaining_today",
-    "solcast_tomorrow":  "sensor.solcast_forecast_tomorrow",
-    "soc":               "sensor.solis_battery_soc",
-    "pv_power":          "sensor.solis_pv_power",
-    "house_load":        "sensor.solis_house_load",
-    "grid_power":        "sensor.solis_grid_power",
-    "boiler_temp":       "sensor.boiler_temperature",
-    "boiler_switch":     "switch.boiler_switch",
+    "solcast_today":     "sensor.solcast_pv_forecast_forecast_remaining_today",
+    "solcast_tomorrow":  "sensor.solcast_pv_forecast_forecast_tomorrow",
+    "soc":               "sensor.solis_s6_eh3p_battery_soc",
+    "pv_power":          "sensor.solis_s6_eh3p_total_pv_power",
+    "house_load":        "sensor.solis_s6_eh3p_household_load_power",
+    "grid_power":        "sensor.solis_s6_eh3p_grid_power_net",
+    "boiler_temp":       "sensor.boiler_temperature",       # TODO: ESP32 prijungus patikslinti
+    "boiler_switch":     "switch.boiler_switch",             # TODO: ESP32 prijungus patikslinti
     "season":            "input_select.energy_season",
     "storm_mode":        "input_boolean.storm_mode",
+    "inverter_temp":     "sensor.solis_s6_eh3p_temperature",
 }
 
-# Vidutinis namų suvartojimas per dieną kWh (bus atnaujinamas iš istorijos)
-DEFAULT_DAILY_CONSUMPTION = 8.0
+# PASTABA dėl inverterio valdymo: šis modulis inverterio NEvaldo tiesiogiai.
+# Jis tik skaičiuoja ir publikuoja sensor.energy_manager_target_soc; patį TOU
+# iškrovimą per LOKALŲ Modbus (solis_s6_eh3p_*) vykdo automations.yaml
+# (solis_evening_discharge 20:00 + solis_tou_recalc_5min). Žemos baterijos
+# apsaugą dienos metu vykdo automacijos solis_daytime_battery_protect (<13%)
+# ir solis_daytime_export_resume (>30%). Cloud (solis_cloud_control_*)
+# entity'ių nenaudojame — jų sistemoje nėra.
+
+# Atsarginis vidutinis namų suvartojimas per dieną kWh — naudojamas TIK kai
+# dinaminis vartojimo modelis (consumption_model.py) dar neturi reikšmės.
+# Seed pagal realų ~13 kWh/parą (buvęs 8.0 stipriai per mažas).
+DEFAULT_DAILY_CONSUMPTION = 13.0
+
+# Vartojimo modelio sensoriai (publikuoja consumption_model.py)
+CONSUMPTION_TOMORROW_SENSOR  = "sensor.consumption_forecast_tomorrow"
+CONSUMPTION_REMAINING_SENSOR = "sensor.consumption_remaining_today"
 
 
 # ============================================================
@@ -97,12 +115,26 @@ class EnergyManager(hass.Hass):
         self.boiler_allowed      = False   # strateginis leidimas
         self.soc_history         = []      # SOC istorija greičio skaičiavimui
         self.last_strategic_run  = None
+        self.last_decision       = "Paleidžiama..."
+        self.last_balance        = 0.0
+        self.last_surplus        = 0.0
+        # SAUGUS startinis tikslas: 100% = „neiškrauti nieko". Anksčiau buvo 0,
+        # dėl ko po restarto automacijos bandydavo iškrauti bateriją iki 0%.
+        # Tikrą reikšmę apskaičiuoja evening_discharge_cycle nuo 18:00.
+        self.last_target_soc     = 100
 
-        # Strateginis ciklas — kas 30 min
+        # Strateginis ciklas — kas 30 min; pirmą kartą po 5 sek
+        self.run_in(self.strategic_cycle, 5)
         self.run_every(self.strategic_cycle, "now", 30 * 60)
 
         # Taktinis ciklas — kas 10 sek
         self.run_every(self.tactical_cycle, "now+15", 10)
+
+        # Sensorių atnaujinimas — kas 5 min. Užtikrina, kad inverterio
+        # temperatūra (ir kita būsena) grafike turėtų taškus kas 5 min, o ne
+        # kas 30 min, kai boileris neaktyvus ir taktinis ciklas išeina anksčiau
+        # nepasiekęs publish_status. Boilerio valdymo logikos neliečia.
+        self.run_every(self.refresh_publish, "now+20", 5 * 60)
 
         # Vakaro iškrovimo ciklas — kas 30 min nuo 18:00 iki 23:00
         self.run_daily(self.evening_discharge_cycle, time(18, 0))
@@ -116,8 +148,132 @@ class EnergyManager(hass.Hass):
         self.run_daily(self.evening_discharge_cycle, time(22, 0))
         self.run_daily(self.evening_discharge_cycle, time(22, 30))
 
+        # Sukuriami sensoriai iš karto, kad dashboard nerodytų "entity not found"
+        self.set_state("sensor.energy_manager_surplus_now", state="0.0",
+                       attributes={"friendly_name": "Saulės perteklius (dabar)",
+                                   "unit_of_measurement": "kW", "icon": "mdi:solar-panel"})
+        self.set_state("sensor.energy_manager_target_soc", state="100",
+                       attributes={"friendly_name": "Tikslinė SOC riba (Solis)",
+                                   "unit_of_measurement": "%", "icon": "mdi:battery-charging-80",
+                                   "device_class": "battery"})
+        self.set_state("sensor.energy_manager_inverter_temp", state="0",
+                       attributes={"friendly_name": "Inverterio temperatūra",
+                                   "unit_of_measurement": "°C", "icon": "mdi:thermometer",
+                                   "device_class": "temperature"})
+
         self.log("EnergyManager paleistas sėkmingai.")
 
+
+    # ============================================================
+    #  BŪSENOS PUBLIKAVIMAS Į HA SENSORIUS
+    # ============================================================
+
+    def refresh_publish(self, kwargs):
+        """Periodinis (kas 5 min) būsenos publikavimas — kad temperatūros ir
+        kitų sensorių grafikai turėtų reguliarius taškus net kai taktinis
+        ciklas išeina anksčiau."""
+        self.publish_status()
+
+    def publish_status(self):
+        """Eksportuoja vidinę automacijos būseną kaip HA sensorius."""
+        # SVARBU: visi skaitiniai state perduodami kaip str(). AppDaemon 4.5.13
+        # clean_http_kwargs() filtruoja reikšmes per `v not in (None, False)`,
+        # o Python'e 0.0 == False, tad skaitinis 0 tyliai dingsta iš POST ir
+        # HA grąžina 400 "No state specified". String "0.0" pereina saugiai.
+        soc           = self.get_float("soc")
+        boiler_temp   = self.get_float("boiler_temp", default=20.0)
+        inverter_temp = self.get_float("inverter_temp", default=0.0)
+        pv_kw         = self.get_float("pv_power") / 1000
+        house_kw      = self.get_float("house_load") / 1000
+        season        = self.get_season()
+        soc_min       = self.get_season_soc_min()
+        storm         = self.is_storm_mode()
+        boiler_state  = self.get_state(SENSOR["boiler_switch"])
+        solcast_t     = self.get_float("solcast_today")
+        solcast_tm    = self.get_float("solcast_tomorrow")
+
+        # PASTABA: sensor.energy_manager_status priklauso template sensoriui
+        # (configuration.yaml — rodo inverterio režimą). Sprendimo tekstas
+        # publikuojamas į ATSKIRĄ entity, kad du šaltiniai nesipjautų.
+        self.set_state(
+            "sensor.energy_manager_decision",
+            # Būsena = paskutinis priimtas sprendimas (HA riboja iki 255 simb.)
+            state=self.last_decision[:254],
+            attributes={
+                "friendly_name": "Energijos valdymas — sprendimas",
+                "icon": "mdi:solar-power-variant",
+                "automacija": "aktyvus",
+                "strateginis_leidimas": "TAIP" if self.boiler_allowed else "NE",
+                "audros_rezimas": "AKTYVUS" if storm else "neaktyvus",
+                "sezonas": season,
+                "soc_minimumas": f"{soc_min}%",
+                "inverterio_temperatura": f"{inverter_temp:.1f}°C",
+            }
+        )
+
+        self.set_state(
+            "sensor.energy_manager_balance",
+            state=str(round(self.last_balance, 2)),
+            attributes={
+                "friendly_name": "Energijos balansas",
+                "unit_of_measurement": "kWh",
+                "icon": "mdi:scale-balance",
+                # state_class reikalingas, kad recorder kauptų ilgalaikę
+                # statistiką; device_class: energy čia negalimas (HA leidžia
+                # tik su total/total_increasing, o balansas svyruoja).
+                "state_class": "measurement",
+                "solcast_siandiena": f"{solcast_t:.1f} kWh",
+                "solcast_rytoj": f"{solcast_tm:.1f} kWh",
+            }
+        )
+
+        # Momentinis perteklius (kW) — ATSKIRAS entity nuo template
+        # sensor.energy_manager_surplus (likusios dienos perteklius kWh).
+        self.set_state(
+            "sensor.energy_manager_surplus_now",
+            state=str(round(self.last_surplus, 2)),
+            attributes={
+                "friendly_name": "Saulės perteklius (dabar)",
+                "unit_of_measurement": "kW",
+                "icon": "mdi:solar-panel",
+                "pv_galia": f"{pv_kw:.2f} kW",
+                "namu_apkrova": f"{house_kw:.2f} kW",
+            }
+        )
+
+        self.set_state(
+            "sensor.energy_manager_target_soc",
+            state=str(self.last_target_soc),
+            attributes={
+                "friendly_name": "Tikslinė SOC riba (Solis)",
+                "unit_of_measurement": "%",
+                "icon": "mdi:battery-charging-80",
+                "device_class": "battery",
+            }
+        )
+
+        self.set_state(
+            "sensor.energy_manager_inverter_temp",
+            state=str(round(inverter_temp, 1)),
+            attributes={
+                "friendly_name": "Inverterio temperatūra",
+                "unit_of_measurement": "°C",
+                "icon": "mdi:thermometer",
+                "device_class": "temperature",
+            }
+        )
+
+        self.set_state(
+            "sensor.energy_manager_boiler_status",
+            state=boiler_state if boiler_state else "unknown",
+            attributes={
+                "friendly_name": "Boilerio valdymo būsena",
+                "icon": "mdi:water-boiler",
+                "temperatura": f"{boiler_temp:.1f}°C",
+                "tikslas": f"{self.get_boiler_temp_target():.0f}°C",
+                "strateginis_leidimas": "TAIP" if self.boiler_allowed else "NE",
+            }
+        )
 
     # ============================================================
     #  PAGALBINĖS FUNKCIJOS
@@ -132,6 +288,16 @@ class EnergyManager(hass.Hass):
             return float(val)
         except (ValueError, TypeError):
             self.log(f"Klaida skaitant {sensor_name}, naudojamas default {default}")
+            return default
+
+    def get_sensor_float(self, entity_id, default=0.0):
+        """Kaip get_float, bet pagal pilną entity_id (ne iš SENSOR žodyno)."""
+        try:
+            val = self.get_state(entity_id)
+            if val in (None, "unavailable", "unknown", ""):
+                return default
+            return float(val)
+        except (ValueError, TypeError):
             return default
 
     def get_season(self):
@@ -167,18 +333,28 @@ class EnergyManager(hass.Hass):
 
     def get_daily_consumption(self):
         """
-        Grąžina vidutinį namų suvartojimą per dieną kWh.
-        Idealiu atveju čia reikėtų pasiimti iš HA statistikos.
-        Kol kas naudojamas konstantinis default.
+        Grąžina prognozuojamą rytojaus namų suvartojimą kWh.
+        Ima iš dinaminio vartojimo modelio (consumption_model.py), kuris mokosi
+        iš realios Solis istorijos (savaitės diena + sezonas + valandinis profilis).
+        Jei modelio sensorius dar neprieinamas — naudoja DEFAULT_DAILY_CONSUMPTION.
         """
-        return DEFAULT_DAILY_CONSUMPTION
+        return self.get_sensor_float(
+            CONSUMPTION_TOMORROW_SENSOR,
+            default=DEFAULT_DAILY_CONSUMPTION,
+        )
 
     def get_consumption_remaining_today(self):
-        """Apskaičiuoja likusį suvartojimą šiandien kWh."""
+        """
+        Likęs suvartojimas šiandien kWh — iš vartojimo modelio (valandinis
+        profilis). Atsarginis variantas: tolygus įvertis pagal likusias valandas.
+        """
         now = datetime.now()
         hours_left = 24 - now.hour - (now.minute / 60)
-        daily = self.get_daily_consumption()
-        return (daily / 24) * hours_left
+        fallback = self.get_daily_consumption() / 24 * hours_left
+        return self.get_sensor_float(
+            CONSUMPTION_REMAINING_SENSOR,
+            default=round(fallback, 2),
+        )
 
     def calculate_soc_drop_rate(self, current_soc):
         """
@@ -200,34 +376,22 @@ class EnergyManager(hass.Hass):
         return drop_per_10min
 
     def boiler_on(self, reason=""):
-        """Įjungia boilerį."""
+        """Įjungia boilerį. Kol ESP32 neprijungtas (entity nėra) — nieko nedaro."""
+        if not self.entity_exists(SENSOR["boiler_switch"]):
+            return
         current = self.get_state(SENSOR["boiler_switch"])
         if current != "on":
             self.turn_on(SENSOR["boiler_switch"])
             self.log(f"Boileris ĮJUNGTAS. Priežastis: {reason}")
 
     def boiler_off(self, reason=""):
-        """Išjungia boilerį."""
+        """Išjungia boilerį. Kol ESP32 neprijungtas (entity nėra) — nieko nedaro."""
+        if not self.entity_exists(SENSOR["boiler_switch"]):
+            return
         current = self.get_state(SENSOR["boiler_switch"])
         if current != "off":
             self.turn_off(SENSOR["boiler_switch"])
             self.log(f"Boileris IŠJUNGTAS. Priežastis: {reason}")
-
-    def set_solis_soc_minimum(self, soc_min):
-        """
-        Nustato Solis S6 SOC minimumą per Modbus.
-        Reikia sukonfigūruoti number entity solis_modbus integracijoje.
-        Pakeisk entity pavadinimą pagal savo integraciją.
-        """
-        try:
-            self.call_service(
-                "number/set_value",
-                entity_id="number.solis_battery_over_discharge_soc",
-                value=soc_min
-            )
-            self.log(f"Solis SOC minimumas nustatytas: {soc_min}%")
-        except Exception as e:
-            self.log(f"Klaida nustatant Solis SOC min: {e}", level="WARNING")
 
 
     # ============================================================
@@ -272,8 +436,8 @@ class EnergyManager(hass.Hass):
         consumption_today    = self.get_consumption_remaining_today()
         consumption_tomorrow = self.get_daily_consumption()
 
-        # Kiek trūksta iki 95% SOC
-        soc_gap_kwh = max(0, (SOC_TARGET_CHARGE - soc) / 100 * BATTERY_CAPACITY_KWH)
+        # Kiek trūksta iki 95% SOC (naudingoji talpa, 1% = 0.15955 kWh)
+        soc_gap_kwh = max(0, (SOC_TARGET_CHARGE - soc) * KWH_PER_SOC)
 
         # Bendras energijos balansas
         total_available = solcast_today + solcast_tomorrow
@@ -291,10 +455,14 @@ class EnergyManager(hass.Hass):
         # Sprendimas
         if balance > BALANCE_MIN_KWH:
             self.boiler_allowed = True
+            self.last_decision = f"Balansas +{balance:.1f} kWh — boileris leidžiamas"
             self.log(f"[STRATEGINIS] Boileris LEIDŽIAMAS — balansas +{balance:.1f} kWh")
         else:
             self.boiler_allowed = False
+            self.last_decision = f"Balansas {balance:.1f} kWh — boileris draudžiamas"
             self.log(f"[STRATEGINIS] Boileris DRAUDŽIAMAS — balansas {balance:.1f} kWh")
+            self.last_balance = balance
+            self.publish_status()
             return
 
         # Papildoma patikra: SOC > 90% — ar rytoj tikrai pasieks 95%?
@@ -305,12 +473,17 @@ class EnergyManager(hass.Hass):
                     f"rytoj tikrai pasieks 95% — boileris LEIDŽIAMAS"
                 )
                 self.boiler_allowed = True
+                self.last_decision = f"SOC {soc:.0f}% > 90%, balansas pakankamas — leidžiamas"
             else:
                 self.log(
                     f"[STRATEGINIS] SOC {soc:.1f}% > 90%, "
                     f"bet balansas per mažas 95% pasiekimui — boileris DRAUDŽIAMAS"
                 )
                 self.boiler_allowed = False
+                self.last_decision = f"SOC {soc:.0f}% > 90%, bet balansas mažas 95% tikslui — draudžiamas"
+
+        self.last_balance = balance
+        self.publish_status()
 
 
     # ============================================================
@@ -327,6 +500,10 @@ class EnergyManager(hass.Hass):
         house_kw    = self.get_float("house_load") / 1000
         grid_kw     = self.get_float("grid_power") / 1000
         boiler_temp = self.get_float("boiler_temp", default=20.0)
+
+        # Žemos baterijos apsaugą (eksporto stabdymą <13% ir atnaujinimą >30%)
+        # vykdo automations.yaml — čia nebevaldome, kad nebūtų dviejų
+        # konkuruojančių logikų su skirtingais slenksčiais.
 
         # 1. Avariniai patikrinimai — visada pirma
         emergency, reason = self.emergency_checks(soc, boiler_temp)
@@ -371,33 +548,37 @@ class EnergyManager(hass.Hass):
         soc_min = self.get_season_soc_min()
 
         if surplus_kw >= BOILER_POWER_KW:
-            # Pilnas perteklius — boileris veikia iš saulės
-            self.boiler_on(
-                f"Perteklius {surplus_kw:.2f} kW >= boilerio {BOILER_POWER_KW} kW"
-            )
+            reason = f"Perteklius {surplus_kw:.2f} kW >= boilerio {BOILER_POWER_KW} kW"
+            self.last_decision = reason
+            self.boiler_on(reason)
 
         elif surplus_kw >= SURPLUS_MIN_KW and soc > SOC_HIGH_THRESHOLD:
-            # Dalinis perteklius — kaupiklis padengia skirtumą
-            # Leidžiame tik jei SOC aukštas (> 90%)
             deficit_kw = BOILER_POWER_KW - surplus_kw
-            self.boiler_on(
+            reason = (
                 f"Dalinis perteklius {surplus_kw:.2f} kW, "
                 f"kaupiklis padengs {deficit_kw:.2f} kW (SOC {soc:.1f}%)"
             )
+            self.last_decision = reason
+            self.boiler_on(reason)
 
         elif surplus_kw >= SURPLUS_MIN_KW and soc > (soc_min + 15):
-            # Perteklius yra ir kaupiklis gerokai virš minimumo
-            self.boiler_on(
+            reason = (
                 f"Perteklius {surplus_kw:.2f} kW, SOC {soc:.1f}% "
                 f"(min+15={soc_min+15}%) — leidžiama"
             )
+            self.last_decision = reason
+            self.boiler_on(reason)
 
         else:
-            # Pertekliaus nėra arba SOC per žemas
-            self.boiler_off(
+            reason = (
                 f"Perteklius per mažas ({surplus_kw:.2f} kW) "
                 f"arba SOC {soc:.1f}% per žemas — {soc_min}% minimumas"
             )
+            self.last_decision = reason
+            self.boiler_off(reason)
+
+        self.last_surplus = surplus_kw
+        self.publish_status()
 
 
     # ============================================================
@@ -426,7 +607,7 @@ class EnergyManager(hass.Hass):
             f"SOC dabar: {soc:.1f}%"
         )
 
-        if expected_surplus >= BATTERY_CAPACITY_KWH:
+        if expected_surplus >= BATTERY_USABLE_KWH:
             # Labai saulėta rytoj — baterija užsikraus pilnai bet kuriuo atveju
             # Galima išleisti iki sezono minimumo
             target_soc = soc_min
@@ -438,7 +619,7 @@ class EnergyManager(hass.Hass):
         elif expected_surplus > 0:
             # Dalinis perteklius — proporcingas tikslas
             # Kuo mažiau pertekliaus, tuo daugiau palikti
-            ratio = expected_surplus / BATTERY_CAPACITY_KWH
+            ratio = expected_surplus / BATTERY_USABLE_KWH
             target_soc = soc_min + int((100 - soc_min) * (1 - min(ratio, 1)))
             target_soc = max(soc_min, min(target_soc, 85))
             self.log(
@@ -459,8 +640,11 @@ class EnergyManager(hass.Hass):
             target_soc = 100
             self.log("[VAKARO] AUDROS režimas — SOC min nustatomas į 100%")
 
-        # Nustatome Solis SOC minimumą
-        self.set_solis_soc_minimum(target_soc)
+        # Tik publikuojame tikslą — patį TOU iškrovimą per Modbus įjungia/atnaujina
+        # automations.yaml (solis_evening_discharge 20:00 + solis_tou_recalc_5min),
+        # skaitydamos sensor.energy_manager_target_soc.
+        self.last_target_soc = target_soc
+        self.publish_status()
 
 
     # ============================================================
@@ -469,13 +653,13 @@ class EnergyManager(hass.Hass):
 
     def send_notification(self, message, title="Energijos valdymas"):
         """
-        Siunčia pranešimą.
-        Pakeisk notify servisą pagal savo konfigūraciją
-        (Telegram, Callmebot Facebook Messenger ir t.t.)
+        Siunčia pranešimą į HA persistent notifications (notify.telegram
+        nesukonfigūruotas — anksčiau visi pranešimai krisdavo į exception).
+        Atsiradus Telegram/mobile_app — pakeisti servisą čia.
         """
         try:
             self.call_service(
-                "notify/telegram",   # <-- pakeisk į savo notify servisą
+                "notify/persistent_notification",
                 title=title,
                 message=message
             )

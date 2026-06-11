@@ -37,8 +37,11 @@ from collections import defaultdict
 ESO_CSV_FILE    = "/config/appdaemon/apps/eso_data.csv"
 MODEL_FILE      = "/config/appdaemon/apps/consumption_model.json"
 
-# Numatytieji koeficientai kol nėra duomenų
-DEFAULT_DAILY_KWH = 8.0
+# Numatytieji koeficientai kol nėra duomenų.
+# daily_avg = BENDRAS (sezoniškai neutralus) paros vidurkis — predict_daily jį
+# padaugina iš savaitės dienos ir sezono koeficientų. Seed ~15 kWh atspindi
+# metinį vidurkį (vasarą faktas ~14 × 1/0.8 ≈ 17, žiemą daugiau), o ne seną 8.0.
+DEFAULT_DAILY_KWH = 15.0
 
 DEFAULT_WEEKDAY_FACTORS = {
     0: 1.15,   # Pirmadienis
@@ -58,8 +61,13 @@ DEFAULT_SEASON_FACTORS = {
 }
 
 SENSOR = {
-    "house_load": "sensor.solis_house_load",
-    "season":     "input_select.energy_season",
+    # Momentinė namų apkrova (W) — naudojama 15 min matavimams (valandinis profilis).
+    # SVARBU: tikrasis Solis Modbus entity, ne senas neegzistuojantis sensor.solis_house_load.
+    "house_load":        "sensor.solis_s6_eh3p_household_load_power",
+    # Vakardienos paros suvartojimas (kWh) — patikimas dienos vidurkio šaltinis,
+    # atsparus AppDaemon restartams (nepriklauso nuo 15 min matavimų tęstinumo).
+    "daily_consumption": "sensor.solis_s6_eh3p_yesterday_energy_consumption",
+    "season":            "input_select.energy_season",
 }
 
 
@@ -355,10 +363,29 @@ class ConsumptionModel(hass.Hass):
         Atnaujina modelį su vakardienos realiais duomenimis.
         Veikia kas dieną 00:05.
         """
-        if not self.daily_readings:
+        # Vakardienos faktinė paros suma: pirmiausia iš Solis paros skaitiklio
+        # (tikslu ir atsparu restartams), kitu atveju — iš surinktų 15 min matavimų.
+        meter_total = None
+        try:
+            raw = self.get_state(SENSOR["daily_consumption"])
+            if raw not in (None, "unavailable", "unknown", ""):
+                meter_total = float(raw)
+        except (ValueError, TypeError):
+            meter_total = None
+
+        readings_total = (
+            sum(r["kwh"] for r in self.daily_readings) if self.daily_readings else 0.0
+        )
+
+        if meter_total and meter_total > 0:
+            yesterday_total = meter_total
+        elif readings_total > 0:
+            yesterday_total = readings_total
+        else:
+            # Nėra patikimų duomenų — modelio nekeičiam (kad nedegraduotų vidurkis).
+            self.daily_readings = []
             return
 
-        yesterday_total = sum(r["kwh"] for r in self.daily_readings)
         yesterday       = (datetime.now() - timedelta(days=1)).date()
         weekday         = str(yesterday.weekday())
         season          = self.month_to_season(yesterday.month)
@@ -368,10 +395,17 @@ class ConsumptionModel(hass.Hass):
             f"(savaitės diena: {weekday}, sezonas: {season})"
         )
 
-        # Atnaujinti dienos vidurkį su exponentiniu glodinimo filtru (α=0.1)
+        # Prieš įtraukiant į EMA, pašaliname savaitės dienos ir sezono įtaką
+        # (deseasonalize), kad daily_avg liktų BENDRAS vidurkis ir predict_daily
+        # nepadaugintų sezono/dienos koeficiento antrą kartą (dvigubas skaičiavimas).
+        wf = float(self.model["weekday_factors"].get(weekday, 1.0)) or 1.0
+        sf = float(self.model["season_factors"].get(season, 1.0)) or 1.0
+        baseline = yesterday_total / (wf * sf)
+
+        # Atnaujinti bendrą dienos vidurkį su eksponentiniu glodinimo filtru (α=0.1)
         alpha = 0.1
         old_avg = self.model["daily_avg"]
-        new_avg = old_avg * (1 - alpha) + yesterday_total * alpha
+        new_avg = old_avg * (1 - alpha) + baseline * alpha
         self.model["daily_avg"] = round(new_avg, 3)
 
         self.model["data_days"] = self.model.get("data_days", 0) + 1
@@ -388,18 +422,20 @@ class ConsumptionModel(hass.Hass):
         tomorrow  = self.predict_tomorrow()
         daily     = self.predict_daily()
 
+        # str() būtina: AppDaemon 4.5.13 clean_http_kwargs() išmeta skaitinį 0
+        # iš POST payload (0.0 == False), tada HA grąžina 400 "No state specified".
         self.set_state(
             "sensor.consumption_remaining_today",
-            state=remaining,
+            state=str(round(remaining, 2)),
             attributes={"unit_of_measurement": "kWh", "friendly_name": "Likusis suvartojimas šiandien"}
         )
         self.set_state(
             "sensor.consumption_forecast_tomorrow",
-            state=tomorrow,
+            state=str(round(tomorrow, 2)),
             attributes={"unit_of_measurement": "kWh", "friendly_name": "Rytojaus suvartojimo prognozė"}
         )
         self.set_state(
             "sensor.consumption_daily_avg",
-            state=daily,
+            state=str(round(daily, 2)),
             attributes={"unit_of_measurement": "kWh", "friendly_name": "Dienos suvartojimo vidurkis"}
         )

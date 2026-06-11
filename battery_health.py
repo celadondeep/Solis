@@ -11,15 +11,10 @@ Stebimi rodikliai:
   - Įkrovimo/iškrovimo efektyvumas
   - Įtampos anomalijos
 
-Reikalingi HA sensoriai:
-  sensor.solis_battery_temperature     — baterijos temperatūra °C
-  sensor.solis_battery_soc             — SOC %
-  sensor.solis_battery_soh             — SOH % (jei palaiko)
-  sensor.solis_battery_cycles          — ciklų skaičius
-  sensor.solis_battery_voltage         — įtampa V
-  sensor.solis_battery_current         — srovė A
-  sensor.solis_today_battery_charge    — šiandien įkrauta kWh
-  sensor.solis_today_battery_discharge — šiandien iškrauta kWh
+Naudojami HA sensoriai (Solis Modbus, žr. SENSOR žodyną žemiau):
+  solis_s6_eh3p_battery_temperature_bms / _soc / _soh / _voltage / _current
+  solis_s6_eh3p_today_battery_charge_energy / _discharge_energy
+  solis_s6_eh3p_total_battery_charge_energy — ekvivalentiniams ciklams
 """
 
 import appdaemon.plugins.hass.hassapi as hass
@@ -49,15 +44,20 @@ EFFICIENCY_MIN = 88.0  # % — žemiau = anomalija
 # Ciklų perspėjimas
 CYCLES_WARNING = 3000  # LFP baterijoms ~6000 ciklų
 
+# Tikri Solis Modbus entity (solis_s6_eh3p_*). Ciklų sensoriaus inverteris
+# neturi — ekvivalentiniai ciklai skaičiuojami iš bendros įkrovos energijos:
+# ciklai ≈ total_charge_kwh / naudingoji talpa (14.2 kWh).
+BATTERY_USABLE_KWH = 14.2
+
 SENSOR = {
-    "temp":      "sensor.solis_battery_temperature",
-    "soc":       "sensor.solis_battery_soc",
-    "soh":       "sensor.solis_battery_soh",
-    "cycles":    "sensor.solis_battery_cycles",
-    "voltage":   "sensor.solis_battery_voltage",
-    "current":   "sensor.solis_battery_current",
-    "charge":    "sensor.solis_today_battery_charge",
-    "discharge": "sensor.solis_today_battery_discharge",
+    "temp":         "sensor.solis_s6_eh3p_battery_temperature_bms",
+    "soc":          "sensor.solis_s6_eh3p_battery_soc",
+    "soh":          "sensor.solis_s6_eh3p_battery_soh",
+    "voltage":      "sensor.solis_s6_eh3p_battery_voltage",
+    "current":      "sensor.solis_s6_eh3p_battery_current",
+    "charge":       "sensor.solis_s6_eh3p_today_battery_charge_energy",
+    "discharge":    "sensor.solis_s6_eh3p_today_battery_discharge_energy",
+    "total_charge": "sensor.solis_s6_eh3p_total_battery_charge_energy",
 }
 
 # Istorijos failas
@@ -86,7 +86,7 @@ class BatteryHealth(hass.Hass):
         self.run_daily(self.calculate_daily_efficiency, "23:55:00")
 
         # SOH ir ciklų patikra — kas savaitę pirmadienį 08:00
-        self.run_weekly(self.check_long_term_health, "mon", "08:00:00")
+        self.run_every(self.check_long_term_health, "now", 7 * 24 * 60 * 60)
 
         # Pilna ataskaita — kas mėnesį 1-ą dieną
         self.run_daily(self.monthly_report, "09:00:00")
@@ -119,7 +119,7 @@ class BatteryHealth(hass.Hass):
 
         try:
             self.call_service(
-                "notify/telegram",
+                "notify/persistent_notification",
                 title=f"🔋 {title}",
                 message=message
             )
@@ -251,10 +251,15 @@ class BatteryHealth(hass.Hass):
     #  ILGALAIKĖ SVEIKATA
     # ============================================================
 
+    def get_equivalent_cycles(self):
+        """Ekvivalentiniai ciklai = bendra įkrovos energija / naudingoji talpa."""
+        total_charge = self.get_float("total_charge", default=0.0)
+        return total_charge / BATTERY_USABLE_KWH if total_charge > 0 else 0.0
+
     def check_long_term_health(self, kwargs):
         """Savaitinė ilgalaikės sveikatos patikra."""
         soh    = self.get_float("soh", default=100.0)
-        cycles = self.get_float("cycles", default=0)
+        cycles = self.get_equivalent_cycles()
 
         self.log(f"[HEALTH] SOH: {soh:.1f}%, Ciklai: {cycles:.0f}")
 
@@ -329,7 +334,7 @@ class BatteryHealth(hass.Hass):
         max_temp = max(temps_max) if temps_max else 0
 
         soh    = self.get_float("soh", default=0)
-        cycles = self.get_float("cycles", default=0)
+        cycles = self.get_equivalent_cycles()
 
         report = (
             f"📊 Mėnesinė kaupiklio ataskaita\n"
@@ -341,9 +346,10 @@ class BatteryHealth(hass.Hass):
         if soh > 0:
             report += f"SOH (sveikata): {soh:.1f}%\n"
         if cycles > 0:
-            report += f"Ciklų skaičius: {cycles:.0f}\n"
+            report += f"Ekvivalentiniai ciklai: {cycles:.0f}\n"
 
         try:
-            self.call_service("notify/telegram", title="🔋 Kaupiklio ataskaita", message=report)
+            self.call_service("notify/persistent_notification",
+                              title="🔋 Kaupiklio ataskaita", message=report)
         except Exception as e:
             self.log(f"Ataskaitos siuntimo klaida: {e}")

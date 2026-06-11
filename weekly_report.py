@@ -14,13 +14,11 @@ Ataskaita apima:
   - Sutaupyta € (skaičiuojama pagal tarifą)
   - Palyginimas su praėjusia savaite
 
-Reikalingi HA sensoriai:
-  sensor.solis_total_pv_power          — generacija kWh (utility meter)
-  sensor.solis_total_energy_purchased  — pirkta iš tinklo kWh
-  sensor.solis_total_energy_sold       — parduota į tinklą kWh
-  sensor.solis_house_load_total        — namų suvartojimas kWh
-  sensor.solcast_forecast_this_week    — Solcast savaitės prognozė
-  sensor.solis_battery_cycles          — ciklai
+Duomenų šaltiniai:
+  Savaitė — utility meter'iai energy_*_week (configuration.yaml, šaltiniai
+  Solis Modbus total skaitliukai, resetinasi pirmadienį 00:00).
+  Diena — Solis Modbus today skaitliukai tiesiogiai.
+  Ciklai — ekvivalentiniai, iš total_battery_charge_energy / 14.2 kWh.
 """
 
 import appdaemon.plugins.hass.hassapi as hass
@@ -38,19 +36,34 @@ ELECTRICITY_PRICE_SELL = 0.08   # €/kWh — kaina parduodant į tinklą
 
 REPORT_FILE = "/config/appdaemon/apps/weekly_reports.json"
 
-# Telegram arba Callmebot (Facebook Messenger)
-NOTIFY_SERVICE = "notify/telegram"   # pakeisti pagal savo
+# HA persistent notifications (Telegram nesukonfigūruotas; atsiradus — pakeisti čia)
+NOTIFY_SERVICE = "notify/persistent_notification"
+
+# Ekvivalentiniai ciklai = bendra įkrovos energija / naudingoji talpa
+BATTERY_USABLE_KWH = 14.2
 
 SENSOR = {
-    "pv_week":         "sensor.energy_pv_week",          # utility meter
-    "grid_buy_week":   "sensor.energy_grid_buy_week",    # utility meter
-    "grid_sell_week":  "sensor.energy_grid_sell_week",   # utility meter
-    "house_week":      "sensor.energy_house_week",       # utility meter
-    "boiler_week":     "sensor.energy_boiler_week",      # utility meter (ESP32)
+    # Savaitiniai utility meter'iai (configuration.yaml → utility_meter:,
+    # šaltiniai — Solis Modbus total skaitliukai; resetinasi pirmadienį 00:00)
+    "pv_week":         "sensor.energy_pv_week",
+    "grid_buy_week":   "sensor.energy_grid_buy_week",
+    "grid_sell_week":  "sensor.energy_grid_sell_week",
+    "house_week":      "sensor.energy_house_week",
+    # Boilerio dar nėra (ESP32 neprijungtas) — kol entity neegzistuoja, bus 0
+    "boiler_week":     "sensor.energy_boiler_week",
+    # Solcast savaitės prognozės sensoriaus nėra — tikslumo eilutė praleidžiama
     "solcast_week":    "sensor.solcast_forecast_this_week",
-    "cycles":          "sensor.solis_battery_cycles",
-    "soc":             "sensor.solis_battery_soc",
-    "pv_actual_week":  "sensor.energy_pv_week",          # realios generacijos utility meter
+    "soc":             "sensor.solis_s6_eh3p_battery_soc",
+    "total_charge":    "sensor.solis_s6_eh3p_total_battery_charge_energy",
+}
+
+# Dienos suvestinei — tiesiogiai Solis Modbus dienos skaitliukai
+DAILY_SENSOR = {
+    "pv":     "sensor.solis_s6_eh3p_pv_today_energy_generation",
+    "house":  "sensor.solis_s6_eh3p_household_load_today_energy",
+    "sell":   "sensor.solis_s6_eh3p_today_energy_fed_into_grid",
+    "buy":    "sensor.solis_s6_eh3p_today_energy_imported_from_grid",
+    "boiler": "sensor.energy_boiler_today",   # ESP32 ateičiai; kol nėra — 0
 }
 
 
@@ -65,8 +78,10 @@ class WeeklyReport(hass.Hass):
 
         self.reports = self.load_reports()
 
-        # Savaitinė ataskaita — sekmadieniais 20:00
-        self.run_weekly(self.send_weekly_report, "sun", "20:00:00")
+        # Savaitinė ataskaita — sekmadieniais 20:00 (savaitinis utility meter
+        # resetinasi pirmadienį 00:00, tad sekmadienio vakarą savaitė ~pilna).
+        # Anksčiau buvo run_every nuo paleidimo — siųsdavo atsitiktiniu laiku.
+        self.run_daily(self.maybe_send_weekly_report, "20:00:00")
 
         # Dienos mini suvestinė — kas dieną 21:00
         self.run_daily(self.send_daily_summary, "21:00:00")
@@ -125,6 +140,11 @@ class WeeklyReport(hass.Hass):
     #  SAVAITINĖ ATASKAITA
     # ============================================================
 
+    def maybe_send_weekly_report(self, kwargs):
+        """Kasdien 20:00 — siunčia tik sekmadienį."""
+        if datetime.now().weekday() == 6:
+            self.send_weekly_report(kwargs)
+
     def send_weekly_report(self, kwargs):
         """Pagrindinė savaitinė ataskaita."""
         now = datetime.now()
@@ -138,8 +158,9 @@ class WeeklyReport(hass.Hass):
         house_kwh    = self.get_float("house_week")
         boiler_kwh   = self.get_float("boiler_week")
         solcast_pred = self.get_float("solcast_week")
-        cycles       = self.get_float("cycles")
         soc          = self.get_float("soc")
+        total_charge = self.get_float("total_charge")
+        cycles       = total_charge / BATTERY_USABLE_KWH if total_charge > 0 else 0
 
         # Finansinis skaičiavimas
         saved_from_grid = pv_kwh * ELECTRICITY_PRICE_BUY
@@ -185,7 +206,7 @@ class WeeklyReport(hass.Hass):
             f"  Grynasis taupymas: {net_saving:.2f} €\n"
             f"\n🔋 KAUPIKLIS\n"
             f"  SOC šiuo metu:     {soc:.0f}%\n"
-            f"  Ciklai iš viso:    {cycles:.0f}"
+            f"  Ekvival. ciklai:   {cycles:.0f}"
             f"{accuracy_str}"
             f"{comparison}"
         )
@@ -214,12 +235,12 @@ class WeeklyReport(hass.Hass):
         Trumpa dienos suvestinė kas vakarą 21:00.
         Siunčia tik jei generacija buvo reikšminga (>1 kWh).
         """
-        # Dienos utility meter sensoriai
-        pv_today     = self._get_today("sensor.energy_pv_today")
-        house_today  = self._get_today("sensor.energy_house_today")
-        sell_today   = self._get_today("sensor.energy_grid_sell_today")
-        buy_today    = self._get_today("sensor.energy_grid_buy_today")
-        boiler_today = self._get_today("sensor.energy_boiler_today")
+        # Solis Modbus dienos skaitliukai
+        pv_today     = self._get_today(DAILY_SENSOR["pv"])
+        house_today  = self._get_today(DAILY_SENSOR["house"])
+        sell_today   = self._get_today(DAILY_SENSOR["sell"])
+        buy_today    = self._get_today(DAILY_SENSOR["buy"])
+        boiler_today = self._get_today(DAILY_SENSOR["boiler"])
         soc          = self.get_float("soc")
 
         if pv_today < 0.5:
