@@ -46,6 +46,12 @@ BATTERY_USABLE_KWH   = 14.2       # naudingoji kaupiklio talpa kWh (100%→11%)
 KWH_PER_SOC          = BATTERY_USABLE_KWH / 89.0   # kWh viename SOC %
 BOILER_POWER_KW      = 2.2        # boilerio galia kW
 ESO_EXPORT_LIMIT_KW  = 1.0        # max atidavimas į tinklą kW
+# Inverterio savivartojimas. Solis sensoriai (household_load_power,
+# yesterday_energy_consumption) jo NEMATO — matuojama tik namų apkrova, todėl
+# poreikio prognozės be šios pataisos ~1.2–1.5 kWh/naktį per mažos.
+# Išmatuota 2026-06-11 naktį: baterija davė vid. ~175 W daugiau nei namai
+# vartojo; fiksuojame 140 W (likutis — apkrovai proporcingi nuostoliai).
+INVERTER_SELF_KW     = 0.14       # inverterio savivartojimas kW (24/7)
 
 # Sezoniniai SOC minimumai %
 SEASON_SOC_MIN = {
@@ -333,28 +339,36 @@ class EnergyManager(hass.Hass):
 
     def get_daily_consumption(self):
         """
-        Grąžina prognozuojamą rytojaus namų suvartojimą kWh.
-        Ima iš dinaminio vartojimo modelio (consumption_model.py), kuris mokosi
-        iš realios Solis istorijos (savaitės diena + sezonas + valandinis profilis).
+        Grąžina prognozuojamą rytojaus suvartojimą kWh: namų poreikis iš
+        vartojimo modelio (consumption_model.py, mokosi iš realios Solis
+        istorijos) + inverterio savivartojimas (INVERTER_SELF_KW × 24 h),
+        kurio Solis vartojimo sensoriai nemato.
         Jei modelio sensorius dar neprieinamas — naudoja DEFAULT_DAILY_CONSUMPTION.
         """
-        return self.get_sensor_float(
+        base = self.get_sensor_float(
             CONSUMPTION_TOMORROW_SENSOR,
             default=DEFAULT_DAILY_CONSUMPTION,
         )
+        return base + INVERTER_SELF_KW * 24
 
     def get_consumption_remaining_today(self):
         """
-        Likęs suvartojimas šiandien kWh — iš vartojimo modelio (valandinis
-        profilis). Atsarginis variantas: tolygus įvertis pagal likusias valandas.
+        Likęs suvartojimas šiandien kWh: namų poreikis iš vartojimo modelio
+        (valandinis profilis) + inverterio savivartojimas likusioms valandoms.
+        Atsarginis variantas: tolygus įvertis pagal likusias valandas.
         """
         now = datetime.now()
         hours_left = 24 - now.hour - (now.minute / 60)
-        fallback = self.get_daily_consumption() / 24 * hours_left
-        return self.get_sensor_float(
+        base_daily = self.get_sensor_float(
+            CONSUMPTION_TOMORROW_SENSOR,
+            default=DEFAULT_DAILY_CONSUMPTION,
+        )
+        fallback = base_daily / 24 * hours_left
+        base = self.get_sensor_float(
             CONSUMPTION_REMAINING_SENSOR,
             default=round(fallback, 2),
         )
+        return base + INVERTER_SELF_KW * hours_left
 
     def calculate_soc_drop_rate(self, current_soc):
         """
@@ -531,8 +545,8 @@ class EnergyManager(hass.Hass):
             return
 
         # 5. Realaus pertekliaus skaičiavimas
-        # Perteklius = saulė - namai - jau atiduodama į tinklą
-        surplus_kw = pv_power_kw - house_kw - ESO_EXPORT_LIMIT_KW
+        # Perteklius = saulė - namai - inverterio savivartojimas - eksporto riba
+        surplus_kw = pv_power_kw - house_kw - INVERTER_SELF_KW - ESO_EXPORT_LIMIT_KW
 
         self.log(
             f"[TAKTINIS] PV: {pv_power_kw:.2f} kW | "
