@@ -31,7 +31,9 @@ Reikalingi HA sensoriai (pritaikyk prie savo):
 """
 
 import appdaemon.plugins.hass.hassapi as hass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
+import json
+import os
 import statistics
 
 
@@ -52,6 +54,32 @@ ESO_EXPORT_LIMIT_KW  = 1.0        # max atidavimas į tinklą kW
 # Išmatuota 2026-06-11 naktį: baterija davė vid. ~175 W daugiau nei namai
 # vartojo; fiksuojame 140 W (likutis — apkrovai proporcingi nuostoliai).
 INVERTER_SELF_KW     = 0.14       # inverterio savivartojimas kW (24/7)
+
+# Inverterio nakties ekonomika. Įjungtas be gamybos inverteris ima ~130 W
+# (iš baterijos), išjungtas (power_state off) valdymo plokštė ima ~30 W iš
+# tinklo. Naudojama skaičiuojant, kada apsimoka išjungti nakčiai.
+INVERTER_IDLE_W      = 130.0      # įjungtas, be gamybos (iš baterijos)
+INVERTER_OFF_W       = 30.0       # išjungtas, valdymo plokštė (iš tinklo)
+
+# Elektros kainos — skaitomos iš input_number (dashboard), šie tik fallback
+# kol input_number nenustatytas (reikšmė ≤ 0.001 laikoma nenustatyta).
+PRICE_BUY_DEFAULT    = 0.18       # €/kWh perkant iš tinklo
+PRICE_SELL_DEFAULT   = 0.08       # €/kWh parduodant į tinklą
+
+# Adaptyvi Solcast korekcija: kasdien 23:50 koeficientas atnaujinamas pagal
+# faktas/prognozė santykį (EMA). Visi strateginiai skaičiavimai naudoja
+# koreguotą prognozę. Koeficientas ribojamas, kad vienas anomalus
+# (pvz. sniego ant panelių) nesugriautų prognozių.
+CORRECTION_FILE      = "/config/appdaemon/apps/forecast_correction.json"
+CORRECTION_ALPHA     = 0.2        # EMA glodinimo koeficientas
+CORRECTION_MIN       = 0.7
+CORRECTION_MAX       = 1.3
+
+# Ryto įjungimas: PV galios slenkstis, nuo kurio gamyba dengia inverterio
+# savivartojimą ir laikyti jį įjungtą tampa pelninga (~100 W skirtumas
+# tarp idle 130 W ir off 30 W).
+MORNING_PV_THRESHOLD_KW = 0.1
+MORNING_ON_MARGIN_MIN   = 15      # įjungti tiek min anksčiau nei slenkstis
 
 # Sezoniniai SOC minimumai %
 SEASON_SOC_MIN = {
@@ -88,6 +116,12 @@ SENSOR = {
     "season":            "input_select.energy_season",
     "storm_mode":        "input_boolean.storm_mode",
     "inverter_temp":     "sensor.solis_s6_eh3p_temperature",
+    "pv_today":          "sensor.solis_s6_eh3p_pv_today_energy_generation",
+    "solcast_today_total": "sensor.solcast_pv_forecast_forecast_today",
+    "battery_power":     "sensor.solis_s6_eh3p_battery_power_net",
+    "power_state":       "switch.solis_s6_eh3p_power_state",
+    "price_buy":         "input_number.electricity_price_buy",
+    "price_sell":        "input_number.electricity_price_sell",
 }
 
 # PASTABA dėl inverterio valdymo: šis modulis inverterio NEvaldo tiesiogiai.
@@ -129,6 +163,12 @@ class EnergyManager(hass.Hass):
         # Tikrą reikšmę apskaičiuoja evening_discharge_cycle nuo 18:00.
         self.last_target_soc     = 100
 
+        # Adaptyvi Solcast korekcija — koeficientas iš failo (default 1.0)
+        self.correction = self.load_correction()
+
+        # Korekcijos atnaujinimas kasdien 23:50 (prieš snapshot 23:55)
+        self.run_daily(self.update_forecast_correction, time(23, 50))
+
         # Strateginis ciklas — kas 30 min; pirmą kartą po 5 sek
         self.run_in(self.strategic_cycle, 5)
         self.run_every(self.strategic_cycle, "now", 30 * 60)
@@ -166,6 +206,10 @@ class EnergyManager(hass.Hass):
                        attributes={"friendly_name": "Inverterio temperatūra",
                                    "unit_of_measurement": "°C", "icon": "mdi:thermometer",
                                    "device_class": "temperature"})
+        self.set_state("sensor.solcast_correction_factor",
+                       state=str(round(self.correction.get("factor", 1.0), 3)),
+                       attributes={"friendly_name": "Solcast korekcijos koeficientas",
+                                   "icon": "mdi:tune-variant"})
 
         self.log("EnergyManager paleistas sėkmingai.")
 
@@ -179,6 +223,7 @@ class EnergyManager(hass.Hass):
         kitų sensorių grafikai turėtų reguliarius taškus net kai taktinis
         ciklas išeina anksčiau."""
         self.publish_status()
+        self.publish_night_economics()
 
     def publish_status(self):
         """Eksportuoja vidinę automacijos būseną kaip HA sensorius."""
@@ -195,8 +240,8 @@ class EnergyManager(hass.Hass):
         soc_min       = self.get_season_soc_min()
         storm         = self.is_storm_mode()
         boiler_state  = self.get_state(SENSOR["boiler_switch"])
-        solcast_t     = self.get_float("solcast_today")
-        solcast_tm    = self.get_float("solcast_tomorrow")
+        solcast_t     = self.corrected_kwh(self.get_float("solcast_today"))
+        solcast_tm    = self.corrected_kwh(self.get_float("solcast_tomorrow"))
 
         # PASTABA: sensor.energy_manager_status priklauso template sensoriui
         # (configuration.yaml — rodo inverterio režimą). Sprendimo tekstas
@@ -370,6 +415,215 @@ class EnergyManager(hass.Hass):
         )
         return base + INVERTER_SELF_KW * hours_left
 
+    # ============================================================
+    #  ADAPTYVI SOLCAST KOREKCIJA
+    # ============================================================
+
+    def load_correction(self):
+        """Įkelia korekcijos koeficientą iš failo arba grąžina default."""
+        try:
+            if os.path.exists(CORRECTION_FILE):
+                with open(CORRECTION_FILE, "r") as f:
+                    data = json.load(f)
+                    self.log(f"Solcast korekcija įkelta: {data.get('factor', 1.0)} "
+                             f"({data.get('days', 0)} d. duomenys)")
+                    return data
+        except Exception as e:
+            self.log(f"Korekcijos įkėlimo klaida: {e}", level="WARNING")
+        return {"factor": 1.0, "days": 0, "updated": None}
+
+    def save_correction(self):
+        try:
+            self.correction["updated"] = datetime.now().isoformat()
+            with open(CORRECTION_FILE, "w") as f:
+                json.dump(self.correction, f, indent=2)
+        except Exception as e:
+            self.log(f"Korekcijos išsaugojimo klaida: {e}", level="WARNING")
+
+    def corrected_kwh(self, value):
+        """Pritaiko adaptyvų korekcijos koeficientą Solcast prognozei."""
+        return value * self.correction.get("factor", 1.0)
+
+    def update_forecast_correction(self, kwargs):
+        """
+        Kasdien 23:50: atnaujina korekcijos koeficientą pagal šios dienos
+        faktas/prognozė santykį (EMA, α=0.2). Santykis ribojamas 0.5–1.5,
+        kad viena anomali diena nesugriautų koeficiento.
+        """
+        actual   = self.get_float("pv_today")
+        forecast = self.get_float("solcast_today_total")
+
+        if forecast < 1.0 or actual <= 0:
+            self.log(f"[KOREKCIJA] Nepakanka duomenų (faktas {actual:.1f}, "
+                     f"prognozė {forecast:.1f}) — koeficientas nekeičiamas.")
+            return
+
+        ratio = max(0.5, min(actual / forecast, 1.5))
+        old   = self.correction.get("factor", 1.0)
+        new   = old * (1 - CORRECTION_ALPHA) + ratio * CORRECTION_ALPHA
+        new   = max(CORRECTION_MIN, min(new, CORRECTION_MAX))
+
+        self.correction["factor"] = round(new, 4)
+        self.correction["days"]   = self.correction.get("days", 0) + 1
+        self.save_correction()
+
+        self.log(f"[KOREKCIJA] Faktas {actual:.1f} / prognozė {forecast:.1f} "
+                 f"= {ratio:.2f} → koeficientas {old:.3f} → {new:.3f}")
+
+    # ============================================================
+    #  INVERTERIO NAKTIES EKONOMIKA
+    # ============================================================
+
+    def get_price(self, key, default):
+        """Elektros kaina iš input_number; fallback į konstantą kol nenustatyta."""
+        val = self.get_sensor_float(SENSOR[key], default=default)
+        return val if val > 0.001 else default
+
+    def get_morning_on_time(self):
+        """
+        Apskaičiuoja optimalų inverterio įjungimo laiką iš Solcast
+        pusvalandinės prognozės: pirmas intervalas, kai koreguota PV galia
+        viršija MORNING_PV_THRESHOLD_KW, minus MORNING_ON_MARGIN_MIN min.
+        Iki vidurdienio žiūri į šiandienos prognozę (aktualu prieš aušrą),
+        po — į rytojaus. Grąžina aware datetime arba None.
+        """
+        now = datetime.now().astimezone()
+        entity = (SENSOR["solcast_today_total"] if now.hour < 12
+                  else SENSOR["solcast_tomorrow"])
+        try:
+            detailed = self.get_state(entity, attribute="detailedForecast")
+            if not detailed:
+                return None
+            factor = self.correction.get("factor", 1.0)
+            for period in detailed:
+                if float(period.get("pv_estimate", 0)) * factor >= MORNING_PV_THRESHOLD_KW:
+                    start = datetime.fromisoformat(period["period_start"])
+                    on_time = start - timedelta(minutes=MORNING_ON_MARGIN_MIN)
+                    # Jei laikas jau praėjęs (pvz. skaičiuojama po aušros) —
+                    # įjungti tuoj pat, kad time-trigger dar suveiktų.
+                    if on_time <= now:
+                        on_time = now + timedelta(minutes=2)
+                    return on_time
+        except Exception as e:
+            self.log(f"Ryto įjungimo laiko klaida: {e}", level="WARNING")
+        return None
+
+    def publish_night_economics(self):
+        """
+        Skaičiuoja ir publikuoja inverterio nakties ekonomiką:
+          ĮJUNGTAS naktį: namai + ~130 W idle iš baterijos. Baterijos kWh
+            vertė priklauso nuo to, ar rytoj baterija vis tiek prisipildys
+            (perteklius → pardavimo kaina) ar ne (pirkimo kaina).
+          IŠJUNGTAS: namai + ~30 W valdymo plokštė iš tinklo (pirkimo kaina).
+        Publikuoja rekomendaciją, €/h palyginimą, numatomą išjungimo laiką
+        (kada SOC pasieks tikslą) ir optimalų ryto įjungimo laiką.
+        """
+        load_w     = self.get_float("house_load")
+        soc        = self.get_float("soc")
+        target_soc = max(float(self.last_target_soc), 11.0)
+        price_buy  = self.get_price("price_buy", PRICE_BUY_DEFAULT)
+        price_sell = self.get_price("price_sell", PRICE_SELL_DEFAULT)
+        power_on   = self.get_state(SENSOR["power_state"]) == "on"
+
+        # Baterijos kWh vertė: ar rytojaus perteklius užpildys bateriją nuo
+        # tikslinio SOC iki 95%? Jei taip — kiekviena naktį išleista kWh būtų
+        # šiaip eksportuota (vertė = pardavimo kaina). Jei ne — jos vertė =
+        # pirkimo kaina (rytoj vakare jos truks ir teks pirkti).
+        tomorrow_corr  = self.corrected_kwh(self.get_float("solcast_tomorrow"))
+        need_tomorrow  = self.get_daily_consumption()
+        surplus_tom    = tomorrow_corr - need_tomorrow
+        headroom_kwh   = max(0.0, (SOC_TARGET_CHARGE - target_soc) * KWH_PER_SOC)
+        battery_refills = surplus_tom >= headroom_kwh
+        batt_value     = price_sell if battery_refills else price_buy
+
+        cost_on_h  = (load_w + INVERTER_IDLE_W) / 1000 * batt_value
+        cost_off_h = (load_w + INVERTER_OFF_W) / 1000 * price_buy
+        diff_h     = cost_on_h - cost_off_h     # >0 → išjungti apsimoka
+
+        # Numatomas išjungimo laikas: kada baterija pasieks tikslinį SOC
+        # dabartiniu iškrovimo greičiu (naktį ~namai + idle).
+        eta_text = "—"
+        if soc > target_soc + 1:
+            # Realus iškrovimo greitis; jei baterija nekraunama/nesikrauna
+            # (diena) — įvertis pagal naktinį scenarijų (namai + idle).
+            batt_w = self.get_sensor_float(SENSOR["battery_power"])
+            discharge_kw = (batt_w if batt_w > 50
+                            else load_w + INVERTER_IDLE_W) / 1000
+            if discharge_kw > 0.05:
+                hours = (soc - target_soc) * KWH_PER_SOC / discharge_kw
+                if hours < 24:
+                    eta = datetime.now() + timedelta(hours=hours)
+                    eta_text = eta.strftime("%H:%M")
+        elif power_on:
+            eta_text = "dabar (SOC ties tikslu)"
+
+        if not power_on:
+            recommendation = "Inverteris išjungtas 💤"
+        elif diff_h > 0.001:
+            recommendation = "Apsimoka išjungti — baterija jau ties tikslu" \
+                if soc <= target_soc + 1 else \
+                f"Išjungti apsimokės ~{eta_text} (pasiekus {target_soc:.0f}%)"
+        else:
+            recommendation = "Laikyti įjungtą — namai iš baterijos pigiau nei iš tinklo"
+
+        # Nakties (8 val.) sutaupymas, jei išjungtume vietoj laikymo įjungto
+        night_savings = max(diff_h, 0) * 8
+
+        self.set_state(
+            "sensor.inverter_night_economics",
+            state=recommendation[:254],
+            attributes={
+                "friendly_name": "Inverterio nakties ekonomika",
+                "icon": "mdi:power-sleep",
+                "kaina_ijungtas_eur_h": round(cost_on_h, 4),
+                "kaina_isjungtas_eur_h": round(cost_off_h, 4),
+                "skirtumas_eur_h": round(diff_h, 4),
+                "sutaupymas_nakti_eur": round(night_savings, 2),
+                "baterijos_kwh_verte": f"{batt_value:.3f} €/kWh "
+                    f"({'prisipildys rytoj — eksporto kaina' if battery_refills else 'nepilnės rytoj — pirkimo kaina'})",
+                "namu_apkrova_w": round(load_w),
+                "idle_w": INVERTER_IDLE_W,
+                "isjungto_w": INVERTER_OFF_W,
+            }
+        )
+
+        self.set_state(
+            "sensor.inverter_shutdown_eta",
+            state=eta_text,
+            attributes={
+                "friendly_name": "Numatomas inverterio išjungimas",
+                "icon": "mdi:clock-end",
+                "soc": soc,
+                "tikslinis_soc": target_soc,
+            }
+        )
+
+        on_time = self.get_morning_on_time()
+        if on_time is not None:
+            self.set_state(
+                "sensor.inverter_morning_on_time",
+                state=on_time.isoformat(),
+                attributes={
+                    "friendly_name": "Inverterio ryto įjungimas",
+                    "device_class": "timestamp",
+                    "icon": "mdi:weather-sunset-up",
+                    "laikas": on_time.strftime("%H:%M"),
+                    "pv_slenkstis_kw": MORNING_PV_THRESHOLD_KW,
+                }
+            )
+
+        self.set_state(
+            "sensor.solcast_correction_factor",
+            state=str(round(self.correction.get("factor", 1.0), 3)),
+            attributes={
+                "friendly_name": "Solcast korekcijos koeficientas",
+                "icon": "mdi:tune-variant",
+                "dienos": self.correction.get("days", 0),
+                "atnaujinta": self.correction.get("updated"),
+                "rytoj_koreguota_kwh": round(tomorrow_corr, 1),
+            }
+        )
+
     def calculate_soc_drop_rate(self, current_soc):
         """
         Skaičiuoja SOC kritimo greitį % per 10 min.
@@ -443,8 +697,8 @@ class EnergyManager(hass.Hass):
         Strateginis ciklas — skaičiuoja energijos balansą
         ir nustato ar boileris apskritai gali veikti šiandien.
         """
-        solcast_today    = self.get_float("solcast_today")
-        solcast_tomorrow = self.get_float("solcast_tomorrow")
+        solcast_today    = self.corrected_kwh(self.get_float("solcast_today"))
+        solcast_tomorrow = self.corrected_kwh(self.get_float("solcast_tomorrow"))
         soc              = self.get_float("soc")
 
         consumption_today    = self.get_consumption_remaining_today()
@@ -605,7 +859,7 @@ class EnergyManager(hass.Hass):
         ir nustato Solis S6 SOC minimumą.
         Veikia kas 30 min nuo 18:00 iki 23:00.
         """
-        solcast_tomorrow = self.get_float("solcast_tomorrow")
+        solcast_tomorrow = self.corrected_kwh(self.get_float("solcast_tomorrow"))
         soc              = self.get_float("soc")
         soc_min          = self.get_season_soc_min()
 

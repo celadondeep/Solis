@@ -31,6 +31,8 @@ import os
 #  KONFIGŪRACIJA
 # ============================================================
 
+# Fallback kainos — realios skaitomos iš input_number.electricity_price_buy/
+# sell (dashboard), šios naudojamos tik kol input_number nenustatytas.
 ELECTRICITY_PRICE_BUY  = 0.18   # €/kWh — kaina perkant iš tinklo
 ELECTRICITY_PRICE_SELL = 0.08   # €/kWh — kaina parduodant į tinklą
 
@@ -101,6 +103,20 @@ class WeeklyReport(hass.Hass):
         except (ValueError, TypeError):
             return default
 
+    def price_buy(self):
+        try:
+            val = float(self.get_state("input_number.electricity_price_buy") or 0)
+            return val if val > 0.001 else ELECTRICITY_PRICE_BUY
+        except (ValueError, TypeError):
+            return ELECTRICITY_PRICE_BUY
+
+    def price_sell(self):
+        try:
+            val = float(self.get_state("input_number.electricity_price_sell") or 0)
+            return val if val > 0.001 else ELECTRICITY_PRICE_SELL
+        except (ValueError, TypeError):
+            return ELECTRICITY_PRICE_SELL
+
     def load_reports(self):
         try:
             if os.path.exists(REPORT_FILE):
@@ -163,9 +179,9 @@ class WeeklyReport(hass.Hass):
         cycles       = total_charge / BATTERY_USABLE_KWH if total_charge > 0 else 0
 
         # Finansinis skaičiavimas
-        saved_from_grid = pv_kwh * ELECTRICITY_PRICE_BUY
-        earned_from_sell = grid_sell * ELECTRICITY_PRICE_SELL
-        cost_from_grid   = grid_buy * ELECTRICITY_PRICE_BUY
+        saved_from_grid = pv_kwh * self.price_buy()
+        earned_from_sell = grid_sell * self.price_sell()
+        cost_from_grid   = grid_buy * self.price_buy()
         net_saving       = saved_from_grid + earned_from_sell - cost_from_grid
 
         # Solcast tikslumas
@@ -246,8 +262,8 @@ class WeeklyReport(hass.Hass):
         if pv_today < 0.5:
             return  # debesuota diena, nesiųsti
 
-        saved = pv_today * ELECTRICITY_PRICE_BUY
-        net   = saved + sell_today * ELECTRICITY_PRICE_SELL - buy_today * ELECTRICITY_PRICE_BUY
+        saved = pv_today * self.price_buy()
+        net   = saved + sell_today * self.price_sell() - buy_today * self.price_buy()
 
         msg = (
             f"🌤 Dienos suvestinė {datetime.now().strftime('%m-%d')}\n"
