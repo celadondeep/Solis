@@ -34,8 +34,12 @@ from collections import defaultdict
 #  KONFIGŪRACIJA
 # ============================================================
 
-ESO_CSV_FILE    = "/config/appdaemon/apps/eso_data.csv"
-MODEL_FILE      = "/config/appdaemon/apps/consumption_model.json"
+# Keliai per __file__ — AppDaemon konteineryje /config rodo į addon'o vidinį
+# katalogą (ne HA config), todėl hardcoded /config/appdaemon/... ten neegzistuoja
+# ir modelis niekada neišsisaugodavo.
+APP_DIR         = os.path.dirname(os.path.abspath(__file__))
+ESO_CSV_FILE    = os.path.join(APP_DIR, "eso_data.csv")
+MODEL_FILE      = os.path.join(APP_DIR, "consumption_model.json")
 
 # Numatytieji koeficientai kol nėra duomenų.
 # daily_avg = BENDRAS (sezoniškai neutralus) paros vidurkis — predict_daily jį

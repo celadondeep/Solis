@@ -45,10 +45,13 @@ except ImportError:
 #  KONFIGŪRACIJA
 # ============================================================
 
-MODEL_FILE       = "/config/appdaemon/apps/ml_consumption_model.pkl"
-SCALER_FILE      = "/config/appdaemon/apps/ml_scaler.pkl"
-TRAINING_FILE    = "/config/appdaemon/apps/consumption_model.json"
-ML_HISTORY_FILE  = "/config/appdaemon/apps/ml_history.json"
+# Keliai per __file__ — AppDaemon konteineryje /config rodo į addon'o vidinį
+# katalogą, todėl hardcoded /config/appdaemon/... ten neegzistuoja.
+_APP_DIR         = os.path.dirname(os.path.abspath(__file__))
+MODEL_FILE       = os.path.join(_APP_DIR, "ml_consumption_model.pkl")
+SCALER_FILE      = os.path.join(_APP_DIR, "ml_scaler.pkl")
+TRAINING_FILE    = os.path.join(_APP_DIR, "consumption_model.json")
+ML_HISTORY_FILE  = os.path.join(_APP_DIR, "ml_history.json")
 
 MIN_TRAINING_DAYS = 60   # minimalus dienų sk. modeliui treniruoti
 

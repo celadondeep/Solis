@@ -36,7 +36,9 @@ import os
 ELECTRICITY_PRICE_BUY  = 0.18   # €/kWh — kaina perkant iš tinklo
 ELECTRICITY_PRICE_SELL = 0.08   # €/kWh — kaina parduodant į tinklą
 
-REPORT_FILE = "/config/appdaemon/apps/weekly_reports.json"
+# Kelias per __file__ — AppDaemon konteineryje /config rodo į addon'o vidinį
+# katalogą, todėl hardcoded /config/appdaemon/... ten neegzistuoja.
+REPORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_reports.json")
 
 # HA persistent notifications (Telegram nesukonfigūruotas; atsiradus — pakeisti čia)
 NOTIFY_SERVICE = "notify/persistent_notification"

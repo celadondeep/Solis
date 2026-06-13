@@ -70,7 +70,13 @@ PRICE_SELL_DEFAULT   = 0.08       # €/kWh parduodant į tinklą
 # faktas/prognozė santykį (EMA). Visi strateginiai skaičiavimai naudoja
 # koreguotą prognozę. Koeficientas ribojamas, kad vienas anomalus
 # (pvz. sniego ant panelių) nesugriautų prognozių.
-CORRECTION_FILE      = "/config/appdaemon/apps/forecast_correction.json"
+# Keliai per __file__ — AppDaemon konteineryje /config rodo į addon'o vidinį
+# katalogą, todėl hardcoded /config/appdaemon/... ten neegzistuoja.
+_APP_DIR             = os.path.dirname(os.path.abspath(__file__))
+CORRECTION_FILE      = os.path.join(_APP_DIR, "forecast_correction.json")
+# Paskutinis target_soc — išsaugomas, kad HA/AppDaemon restartas vakare ar
+# naktį negrąžintų tikslo į 100% iki kito 18:00 perskaičiavimo.
+TARGET_SOC_FILE      = os.path.join(_APP_DIR, "target_soc.json")
 CORRECTION_ALPHA     = 0.2        # EMA glodinimo koeficientas
 CORRECTION_MIN       = 0.7
 CORRECTION_MAX       = 1.3
@@ -158,10 +164,11 @@ class EnergyManager(hass.Hass):
         self.last_decision       = "Paleidžiama..."
         self.last_balance        = 0.0
         self.last_surplus        = 0.0
-        # SAUGUS startinis tikslas: 100% = „neiškrauti nieko". Anksčiau buvo 0,
-        # dėl ko po restarto automacijos bandydavo iškrauti bateriją iki 0%.
-        # Tikrą reikšmę apskaičiuoja evening_discharge_cycle nuo 18:00.
-        self.last_target_soc     = 100
+        # Startinis tikslas: atstatomas iš failo, jei vakar/šiandien jau buvo
+        # apskaičiuotas (kitaip restartas vakare užšaldytų 100% iki kito 18:00).
+        # Jei failo nėra ar jis pasenęs — saugus 100% = „neiškrauti nieko".
+        # (Anksčiau būdavo 0, dėl ko po restarto iškraudavo bateriją iki 0%.)
+        self.last_target_soc     = self.load_target_soc()
 
         # Adaptyvi Solcast korekcija — koeficientas iš failo (default 1.0)
         self.correction = self.load_correction()
@@ -198,7 +205,7 @@ class EnergyManager(hass.Hass):
         self.set_state("sensor.energy_manager_surplus_now", state="0.0",
                        attributes={"friendly_name": "Saulės perteklius (dabar)",
                                    "unit_of_measurement": "kW", "icon": "mdi:solar-panel"})
-        self.set_state("sensor.energy_manager_target_soc", state="100",
+        self.set_state("sensor.energy_manager_target_soc", state=str(self.last_target_soc),
                        attributes={"friendly_name": "Tikslinė SOC riba (Solis)",
                                    "unit_of_measurement": "%", "icon": "mdi:battery-charging-80",
                                    "device_class": "battery"})
@@ -439,6 +446,32 @@ class EnergyManager(hass.Hass):
                 json.dump(self.correction, f, indent=2)
         except Exception as e:
             self.log(f"Korekcijos išsaugojimo klaida: {e}", level="WARNING")
+
+    def load_target_soc(self):
+        """Atstato paskutinį target_soc po restarto. Reikšmė galioja 24 val. —
+        senesnė reiškia, kad sistema ilgai stovėjo, tada saugiau 100%."""
+        try:
+            if os.path.exists(TARGET_SOC_FILE):
+                with open(TARGET_SOC_FILE, "r") as f:
+                    data = json.load(f)
+                saved = datetime.fromisoformat(data["updated"])
+                age_h = (datetime.now() - saved).total_seconds() / 3600
+                target = int(data["target_soc"])
+                if age_h <= 24 and 11 <= target <= 100:
+                    self.log(f"Target SOC atstatytas iš failo: {target}% "
+                             f"(išsaugota prieš {age_h:.1f} val.)")
+                    return target
+        except Exception as e:
+            self.log(f"Target SOC įkėlimo klaida: {e}", level="WARNING")
+        return 100
+
+    def save_target_soc(self):
+        try:
+            with open(TARGET_SOC_FILE, "w") as f:
+                json.dump({"target_soc": int(self.last_target_soc),
+                           "updated": datetime.now().isoformat()}, f, indent=2)
+        except Exception as e:
+            self.log(f"Target SOC išsaugojimo klaida: {e}", level="WARNING")
 
     def corrected_kwh(self, value):
         """Pritaiko adaptyvų korekcijos koeficientą Solcast prognozei."""
@@ -912,6 +945,7 @@ class EnergyManager(hass.Hass):
         # automations.yaml (solis_evening_discharge 20:00 + solis_tou_recalc_5min),
         # skaitydamos sensor.energy_manager_target_soc.
         self.last_target_soc = target_soc
+        self.save_target_soc()
         self.publish_status()
 
 

@@ -61,7 +61,9 @@ SENSOR = {
 }
 
 # Istorijos failas
-HISTORY_FILE = "/config/appdaemon/apps/battery_history.json"
+# Kelias per __file__ — AppDaemon konteineryje /config rodo į addon'o vidinį
+# katalogą, todėl hardcoded /config/appdaemon/... ten neegzistuoja.
+HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "battery_history.json")
 
 
 # ============================================================
