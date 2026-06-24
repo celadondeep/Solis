@@ -18,7 +18,7 @@ Duomenų šaltiniai:
   Savaitė — utility meter'iai energy_*_week (configuration.yaml, šaltiniai
   Solis Modbus total skaitliukai, resetinasi pirmadienį 00:00).
   Diena — Solis Modbus today skaitliukai tiesiogiai.
-  Ciklai — ekvivalentiniai, iš total_battery_charge_energy / 14.2 kWh.
+  Ciklai — ekvivalentiniai, iš total_battery_charge_energy / 15.2 kWh.
 """
 
 import appdaemon.plugins.hass.hassapi as hass
@@ -43,8 +43,8 @@ REPORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_r
 # HA persistent notifications (Telegram nesukonfigūruotas; atsiradus — pakeisti čia)
 NOTIFY_SERVICE = "notify/persistent_notification"
 
-# Ekvivalentiniai ciklai = bendra įkrovos energija / naudingoji talpa
-BATTERY_USABLE_KWH = 14.2
+# Ekvivalentiniai ciklai = bendra įkrovos energija / naudingoji talpa (5–100%)
+BATTERY_USABLE_KWH = 15.2
 
 SENSOR = {
     # Savaitiniai utility meter'iai (configuration.yaml → utility_meter:,
