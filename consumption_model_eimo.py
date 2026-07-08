@@ -1,5 +1,8 @@
 """
-consumption_model.py — Dinaminis namų suvartojimo modelis
+consumption_model_eimo.py — 2-os elektrinės (Eimo SE) suvartojimo modelis
+=========================================================================
+ATSKIRA, NEPRIKLAUSOMA kopija nuo 1-os elektrinės consumption_model.py.
+Publikuoja *_eimo sensorius; būsena consumption_model_eimo.json.
 ==========================================================
 Naudoja ESO istorinius duomenis ir HA statistiką
 tikslesniam suvartojimo prognozavimui.
@@ -12,7 +15,7 @@ kuris atsižvelgia į:
 
 ESO duomenų importas:
   1. Parsisiųsk CSV iš eso.lt (Mano ESO → Suvartojimas)
-  2. Nukopijuok į /config/appdaemon/apps/eso_data.csv
+  2. Nukopijuok į /config/appdaemon/apps/eso_data_eimo.csv
   3. Skriptas automatiškai importuos
 
 CSV formatas (ESO eksportas):
@@ -44,8 +47,8 @@ MEDIAN_WINDOW_DAYS = 14   # medianos langas daily_avg skaičiavimui
 # katalogą (ne HA config), todėl hardcoded /config/appdaemon/... ten neegzistuoja
 # ir modelis niekada neišsisaugodavo.
 APP_DIR         = os.path.dirname(os.path.abspath(__file__))
-ESO_CSV_FILE    = os.path.join(APP_DIR, "eso_data.csv")
-MODEL_FILE      = os.path.join(APP_DIR, "consumption_model.json")
+ESO_CSV_FILE    = os.path.join(APP_DIR, "eso_data_eimo.csv")
+MODEL_FILE      = os.path.join(APP_DIR, "consumption_model_eimo.json")
 
 # Numatytieji koeficientai kol nėra duomenų.
 # daily_avg = BENDRAS (sezoniškai neutralus) paros vidurkis — predict_daily jį
@@ -71,13 +74,13 @@ DEFAULT_SEASON_FACTORS = {
 }
 
 SENSOR = {
-    # Momentinė namų apkrova (W) — naudojama 15 min matavimams (valandinis profilis).
-    # SVARBU: tikrasis Solis Modbus entity, ne senas neegzistuojantis sensor.solis_house_load.
-    "house_load":        "sensor.solis_s6_eh3p_household_load_power",
-    # Vakardienos paros suvartojimas (kWh) — patikimas dienos vidurkio šaltinis,
-    # atsparus AppDaemon restartams (nepriklauso nuo 15 min matavimų tęstinumo).
-    "daily_consumption": "sensor.solis_s6_eh3p_yesterday_energy_consumption",
-    "season":            "input_select.energy_season",
+    # Momentinė namų apkrova (W) — Eimo cloud sensorius (15 min matavimams).
+    "house_load":        "sensor.solis_inverter_1033300254190112_solis_total_consumption_power",
+    # Vakardienos paros suvartojimas: cloud integracija atskiro „yesterday" sensoriaus
+    # neturi, todėl entity neegzistuoja → update_model krenta į 15 min matavimų sumą
+    # (readings_total). Vėliau galima prijungti utility_meter dienos ciklą.
+    "daily_consumption": "sensor.eimo_consumption_yesterday",
+    "season":            "input_select.energy_season_eimo",
 }
 
 
@@ -492,17 +495,17 @@ class ConsumptionModel(hass.Hass):
         # str() būtina: AppDaemon 4.5.13 clean_http_kwargs() išmeta skaitinį 0
         # iš POST payload (0.0 == False), tada HA grąžina 400 "No state specified".
         self.set_state(
-            "sensor.consumption_remaining_today",
+            "sensor.consumption_remaining_today_eimo",
             state=str(round(remaining, 2)),
             attributes={"unit_of_measurement": "kWh", "friendly_name": "Likusis suvartojimas šiandien"}
         )
         self.set_state(
-            "sensor.consumption_forecast_tomorrow",
+            "sensor.consumption_forecast_tomorrow_eimo",
             state=str(round(tomorrow, 2)),
             attributes={"unit_of_measurement": "kWh", "friendly_name": "Rytojaus suvartojimo prognozė"}
         )
         self.set_state(
-            "sensor.consumption_daily_avg",
+            "sensor.consumption_daily_avg_eimo",
             state=str(round(daily, 2)),
             attributes={"unit_of_measurement": "kWh", "friendly_name": "Dienos suvartojimo vidurkis"}
         )
