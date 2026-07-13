@@ -86,13 +86,15 @@ CORRECTION_MAX       = 1.3
 # savivartojimą ir laikyti jį įjungtą tampa pelninga (~100 W skirtumas
 # tarp idle 130 W ir off 30 W).
 MORNING_PV_THRESHOLD_KW = 0.1
-MORNING_ON_MARGIN_MIN   = 15      # įjungti tiek min anksčiau nei slenkstis
+MORNING_ON_MARGIN_MIN   = 30      # įjungti tiek min anksčiau nei slenkstis
+                                  # (30, nes Solcast prognozė pusvalandinė —
+                                  # perkirtimas gali būti periodo pradžioje)
 
 # Sezoniniai SOC minimumai %
 SEASON_SOC_MIN = {
     "žiema":      80,
     "pavasaris":  60,
-    "vasara":     5,
+    "vasara":     10,
     "ruduo":      60,
 }
 

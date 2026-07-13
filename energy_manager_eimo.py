@@ -94,7 +94,7 @@ MORNING_ON_MARGIN_MIN   = 15      # įjungti tiek min anksčiau nei slenkstis
 SEASON_SOC_MIN = {
     "žiema":      80,
     "pavasaris":  60,
-    "vasara":     20,
+    "vasara":     5,
     "ruduo":      60,
 }
 
@@ -586,8 +586,10 @@ class EnergyManager(hass.Hass):
         if soc > target_soc + 1:
             # Realus iškrovimo greitis; jei baterija nekraunama/nesikrauna
             # (diena) — įvertis pagal naktinį scenarijų (namai + idle).
+            # Eimo cloud battery_power ženklas: + = kraunasi, − = iškrauna
+            # (atvirkščiai nei Modbus; patikrinta 2026-07-13 pagal istoriją).
             batt_w = self.get_sensor_float(SENSOR["battery_power"])
-            discharge_kw = (batt_w if batt_w > 50
+            discharge_kw = (-batt_w if batt_w < -50
                             else load_w + INVERTER_IDLE_W) / 1000
             if discharge_kw > 0.05:
                 hours = (soc - target_soc) * KWH_PER_SOC / discharge_kw
