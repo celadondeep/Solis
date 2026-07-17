@@ -13,3 +13,12 @@ consumption_model:
 weekly_report:
   module: weekly_report
   class: WeeklyReport
+
+# ── 2-a elektrinė (Eimo SE) — atskira, nepriklausoma sistema (cloud Solis) ──
+energy_manager_eimo:
+  module: energy_manager_eimo
+  class: EnergyManager
+
+consumption_model_eimo:
+  module: consumption_model_eimo
+  class: ConsumptionModel

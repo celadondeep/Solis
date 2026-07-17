@@ -1,2 +1,4 @@
 __pycache__/
 *.pyc
+# AppDaemon runtime būsena (korekcijos, modeliai, istorijos) — ne kodas
+*.json

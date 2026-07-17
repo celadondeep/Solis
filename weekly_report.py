@@ -18,7 +18,7 @@ Duomenų šaltiniai:
   Savaitė — utility meter'iai energy_*_week (configuration.yaml, šaltiniai
   Solis Modbus total skaitliukai, resetinasi pirmadienį 00:00).
   Diena — Solis Modbus today skaitliukai tiesiogiai.
-  Ciklai — ekvivalentiniai, iš total_battery_charge_energy / 15.2 kWh.
+  Ciklai — ekvivalentiniai, iš total_battery_charge_energy / 14.4 kWh.
 """
 
 import appdaemon.plugins.hass.hassapi as hass
@@ -43,8 +43,10 @@ REPORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_r
 # HA persistent notifications (Telegram nesukonfigūruotas; atsiradus — pakeisti čia)
 NOTIFY_SERVICE = "notify/persistent_notification"
 
-# Ekvivalentiniai ciklai = bendra įkrovos energija / naudingoji talpa (5–100%)
-BATTERY_USABLE_KWH = 15.2
+# Ekvivalentiniai ciklai = bendra įkrovos energija / naudingoji talpa.
+# 14.4 = 16 kWh × 90% (ruožas 10–100%; BMS fizinis dugnas 10%, 2026-07-14) —
+# suderinta su energy_manager.py ir sensor.battery_equivalent_cycles.
+BATTERY_USABLE_KWH = 14.4
 
 SENSOR = {
     # Savaitiniai utility meter'iai (configuration.yaml → utility_meter:,
@@ -105,19 +107,22 @@ class WeeklyReport(hass.Hass):
         except (ValueError, TypeError):
             return default
 
-    def price_buy(self):
+    def _price(self, entity_id, default):
+        """0 — TEISĖTA kaina (ESO pasaugojimo schema: buy=0.0/sell=0.25);
+        fallback tik kai entity nepasiekiamas."""
         try:
-            val = float(self.get_state("input_number.electricity_price_buy") or 0)
-            return val if val > 0.001 else ELECTRICITY_PRICE_BUY
+            raw = self.get_state(entity_id)
+            if raw in (None, "unavailable", "unknown", ""):
+                return default
+            return max(float(raw), 0.0)
         except (ValueError, TypeError):
-            return ELECTRICITY_PRICE_BUY
+            return default
+
+    def price_buy(self):
+        return self._price("input_number.electricity_price_buy", ELECTRICITY_PRICE_BUY)
 
     def price_sell(self):
-        try:
-            val = float(self.get_state("input_number.electricity_price_sell") or 0)
-            return val if val > 0.001 else ELECTRICITY_PRICE_SELL
-        except (ValueError, TypeError):
-            return ELECTRICITY_PRICE_SELL
+        return self._price("input_number.electricity_price_sell", ELECTRICITY_PRICE_SELL)
 
     def load_reports(self):
         try:
@@ -180,8 +185,10 @@ class WeeklyReport(hass.Hass):
         total_charge = self.get_float("total_charge")
         cycles       = total_charge / BATTERY_USABLE_KWH if total_charge > 0 else 0
 
-        # Finansinis skaičiavimas
-        saved_from_grid = pv_kwh * self.price_buy()
+        # Finansinis skaičiavimas. Savo reikmėms panaudota saulė = PV − parduota
+        # (parduotoji vertinama pardavimo kaina žemiau — kitaip eksportuota kWh
+        # užskaitoma dvigubai; formulė kaip sensor.energy_savings_today).
+        saved_from_grid = max(pv_kwh - grid_sell, 0.0) * self.price_buy()
         earned_from_sell = grid_sell * self.price_sell()
         cost_from_grid   = grid_buy * self.price_buy()
         net_saving       = saved_from_grid + earned_from_sell - cost_from_grid
@@ -264,7 +271,8 @@ class WeeklyReport(hass.Hass):
         if pv_today < 0.5:
             return  # debesuota diena, nesiųsti
 
-        saved = pv_today * self.price_buy()
+        # Savo reikmėms = PV − parduota (be dvigubo eksporto užskaitymo)
+        saved = max(pv_today - sell_today, 0.0) * self.price_buy()
         net   = saved + sell_today * self.price_sell() - buy_today * self.price_buy()
 
         msg = (

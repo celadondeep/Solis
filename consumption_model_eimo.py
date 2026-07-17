@@ -76,9 +76,10 @@ DEFAULT_SEASON_FACTORS = {
 SENSOR = {
     # Momentinė namų apkrova (W) — Eimo cloud sensorius (15 min matavimams).
     "house_load":        "sensor.solis_inverter_1033300254190112_solis_total_consumption_power",
-    # Vakardienos paros suvartojimas: cloud integracija atskiro „yesterday" sensoriaus
-    # neturi, todėl entity neegzistuoja → update_model krenta į 15 min matavimų sumą
-    # (readings_total). Vėliau galima prijungti utility_meter dienos ciklą.
+    # Vakardienos paros suvartojimas — utility_meter last_period per template
+    # (packages/eimo.yaml: eimo_house_energy → eimo_consumption_today →
+    # eimo_consumption_yesterday; nuo 2026-07-17). Kol pirmas paros ciklas
+    # nepasibaigęs, sensorius unavailable → update_model krenta į 15 min sumą.
     "daily_consumption": "sensor.eimo_consumption_yesterday",
     "season":            "input_select.energy_season_eimo",
 }

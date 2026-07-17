@@ -15,7 +15,7 @@ Sistemos parametrai:
 Logikos lygiai:
   1. Avariniai patikrinimai  — kiekvienam ciklui
   2. Strateginis ciklas      — kas 30 min (Solcast prognozė)
-  3. Taktinis ciklas         — kas 10 sek (realūs duomenys)
+  3. Taktinis ciklas         — kas 60 sek (cloud duomenys ~5 min latencija)
   4. Vakaro iškrovimas       — kas 30 min nuo 18:00
 
 Reikalingi HA sensoriai (pritaikyk prie savo):
@@ -35,7 +35,6 @@ import appdaemon.plugins.hass.hassapi as hass
 from datetime import datetime, time, timedelta
 import json
 import os
-import statistics
 
 
 # ============================================================
@@ -50,7 +49,20 @@ KWH_PER_SOC          = BATTERY_USABLE_KWH / 95.0   # kWh viename SOC % (≈0.143
 # Absoliutus SOC dugnas (Dyness leidžia iki 5%).
 MIN_SOC              = 5
 BOILER_POWER_KW      = 2.2        # boilerio galia kW
-ESO_EXPORT_LIMIT_KW  = 1.0        # max atidavimas į tinklą kW
+ESO_EXPORT_LIMIT_KW  = 1.0        # max atidavimas į tinklą kW (Eimo taip pat 1 kW,
+                                  # vartotojo patvirtinta 2026-07-14)
+# REALIZAVIMO plane vartojimas vertinamas nuosaikiai (2026-07-14, vartotojo
+# nurodymas): jis paroje pasiskirsto netolygiai ir nėra patikimas kanalas,
+# todėl plane užskaitoma tik garantuota bazinė apkrova, o visas likęs
+# vartojimas lieka neplanuojamu bonusu.
+CONS_BASE_KW         = 0.3
+
+# REALIZAVIMO planavimo marža prognozei (2026-07-14, vartotojo kriterijus:
+# svarbiausia realizuoti VISĄ pagamintą saulės energiją, target SOC — tik
+# įrankis). Nuostoliai asimetriški: nukirpta kWh prarandama 100 %, o per
+# daug paruošta vieta kainuoja tik naktinio eksporto round-trip ~8 %
+# (ESO pasaugojimo banke kWh vertės nepraranda).
+PLAN_MARGIN          = 1.15
 # Inverterio savivartojimas. Solis sensoriai (household_load_power,
 # yesterday_energy_consumption) jo NEMATO — matuojama tik namų apkrova, todėl
 # poreikio prognozės be šios pataisos ~1.2–1.5 kWh/naktį per mažos.
@@ -65,7 +77,8 @@ INVERTER_IDLE_W      = 130.0      # įjungtas, be gamybos (iš baterijos)
 INVERTER_OFF_W       = 30.0       # išjungtas, valdymo plokštė (iš tinklo)
 
 # Elektros kainos — skaitomos iš input_number (dashboard), šie tik fallback
-# kol input_number nenustatytas (reikšmė ≤ 0.001 laikoma nenustatyta).
+# kai input_number nepasiekiamas. 0 — teisėta reikšmė (ESO pasaugojimo
+# schema: buy=0.0/sell=0.25), žr. get_price().
 PRICE_BUY_DEFAULT    = 0.18       # €/kWh perkant iš tinklo
 PRICE_SELL_DEFAULT   = 0.08       # €/kWh parduodant į tinklą
 
@@ -88,7 +101,10 @@ CORRECTION_MAX       = 1.3
 # savivartojimą ir laikyti jį įjungtą tampa pelninga (~100 W skirtumas
 # tarp idle 130 W ir off 30 W).
 MORNING_PV_THRESHOLD_KW = 0.1
-MORNING_ON_MARGIN_MIN   = 15      # įjungti tiek min anksčiau nei slenkstis
+MORNING_ON_MARGIN_MIN   = 30      # įjungti tiek min anksčiau nei slenkstis
+                                  # (30, kaip Solis: Solcast prognozė
+                                  # pusvalandinė — perkirtimas gali būti
+                                  # periodo pradžioje)
 
 # Sezoniniai SOC minimumai %
 SEASON_SOC_MIN = {
@@ -141,8 +157,10 @@ SENSOR = {
 # Jis tik skaičiuoja ir publikuoja sensor.energy_manager_eimo_target_soc; patį TOU
 # iškrovimą per CLOUD (solis_cloud_control slot1_*) vykdo packages/eimo.yaml
 # automacijos (solis_evening_discharge_eimo 20:00 + solis_tou_recalc_eimo kas 5 min).
-# Žemos baterijos apsaugą dienos metu vykdo solis_daytime_battery_protect_eimo /
-# _export_resume_eimo. SOC dugnas — MIN_SOC (5%).
+# Žemos baterijos apsaugą dienos metu užtikrina paties sloto cut-off SOC
+# (daytime_export_floor_eimo, min 6%) — atskirų protect/resume automacijų,
+# kaip Modbus pusėje, nereikia, nes Eimo iškrauna tik per slotą su cut-off.
+# SOC dugnas — MIN_SOC (5%).
 
 # Atsarginis vidutinis namų suvartojimas per dieną kWh — naudojamas TIK kai
 # dinaminis vartojimo modelis (consumption_model.py) dar neturi reikšmės.
@@ -208,6 +226,12 @@ class EnergyManager(hass.Hass):
         self.run_daily(self.evening_discharge_cycle, time(22, 0))
         self.run_daily(self.evening_discharge_cycle, time(22, 30))
 
+        # Ryto vietos patikra — kol naktinis slotas dar gali padaryti vietos
+        # (recalc solis_tou_recalc_eimo iki 07:00). Tik žemina target.
+        self.run_daily(self.morning_room_check, time(5, 30))
+        self.run_daily(self.morning_room_check, time(6, 15))
+        self.run_daily(self.morning_room_check, time(6, 45))
+
         # Sukuriami sensoriai iš karto, kad dashboard nerodytų "entity not found"
         self.set_state("sensor.energy_manager_eimo_surplus_now", state="0.0",
                        attributes={"friendly_name": "Saulės perteklius (dabar)",
@@ -238,6 +262,7 @@ class EnergyManager(hass.Hass):
         ciklas išeina anksčiau."""
         self.publish_status()
         self.publish_night_economics()
+        self.publish_realization()
 
     def publish_status(self):
         """Eksportuoja vidinę automacijos būseną kaip HA sensorius."""
@@ -515,9 +540,12 @@ class EnergyManager(hass.Hass):
     # ============================================================
 
     def get_price(self, key, default):
-        """Elektros kaina iš input_number; fallback į konstantą kol nenustatyta."""
-        val = self.get_sensor_float(SENSOR[key], default=default)
-        return val if val > 0.001 else default
+        """Elektros kaina iš input_number. 0 — TEISĖTA reikšmė (ESO pasaugojimo
+        schema: buy=0.0/sell=0.25), todėl fallback į konstantą taikomas tik kai
+        entity nepasiekiamas (iki 2026-07-17 sentinel >0.001 versdavo sąmoningą
+        0.0 į 0.18 ir ekonomika skaičiuota ne ta kaina)."""
+        val = self.get_sensor_float(SENSOR[key], default=-1.0)
+        return val if val >= 0 else default
 
     def get_morning_on_time(self):
         """
@@ -797,7 +825,7 @@ class EnergyManager(hass.Hass):
 
 
     # ============================================================
-    #  3. TAKTINIS CIKLAS — kas 10 sek
+    #  3. TAKTINIS CIKLAS — kas 60 sek
     # ============================================================
 
     def tactical_cycle(self, kwargs):
@@ -811,8 +839,8 @@ class EnergyManager(hass.Hass):
         grid_kw     = self.get_float("grid_power") / 1000
         boiler_temp = self.get_float("boiler_temp", default=20.0)
 
-        # Žemos baterijos apsaugą (eksporto stabdymą <13% ir atnaujinimą >30%)
-        # vykdo automations.yaml — čia nebevaldome, kad nebūtų dviejų
+        # Žemos baterijos apsaugą užtikrina cloud sloto cut-off SOC
+        # (packages/eimo.yaml) — čia nevaldome, kad nebūtų dviejų
         # konkuruojančių logikų su skirtingais slenksčiais.
 
         # 1. Avariniai patikrinimai — visada pirma
@@ -892,67 +920,161 @@ class EnergyManager(hass.Hass):
 
 
     # ============================================================
-    #  4. VAKARO IŠKROVIMO CIKLAS
+    #  4. VAKARO IŠKROVIMO CIKLAS + REALIZAVIMO KRITERIJUS
     # ============================================================
+
+    def battery_room_needed(self, day):
+        """
+        REALIZAVIMO kriterijus (2026-07-14): kiek kWh baterijos vietos reikia,
+        kad VISA prognozuojama Eimo saulė būtų realizuota — sugerta namų
+        apkrovos, ESO 1 kW eksporto arba baterijos, be nukirpimo.
+
+        Kiekvienam Solcast 30 min periodui: kas iš PV galios (× Eimo korekcija
+        × PLAN_MARGIN; šiandienai dar × intradienos santykis) netelpa į
+        bazinę namų apkrovą (CONS_BASE_KW) + 1 kW eksportą, PRIVALO tilpti į
+        bateriją. Vartojimo prognozė plane neužskaitoma — tik bonusas.
+        Solcast masyvas bendras — Eimo galios profilį duoda korekcijos
+        koeficientas (solcast_correction_factor_eimo).
+
+        day: "today" (nuo dabar iki paros galo) arba "tomorrow" (visa para).
+        Grąžina (reikia_kwh, eksportas_kwh, pv_plan_kwh).
+        """
+        factor = self.correction.get("factor", 1.0) * PLAN_MARGIN
+        now = datetime.now().astimezone()
+
+        if day == "today":
+            entity = SENSOR["solcast_today_total"]
+            # Intradienos santykis: jei gamyba jau lenkia prognozę, likusi
+            # diena planuojama pagal faktą. Tik didina — mažėjimą dengia marža.
+            intraday = self.get_sensor_float("sensor.solcast_intraday_ratio_eimo",
+                                             default=1.0)
+            factor *= max(intraday, 1.0)
+            cons = self.get_consumption_remaining_today()
+            hours_left = max(1.0, 24.0 - now.hour - now.minute / 60.0)
+            load_kw = cons / hours_left
+        else:
+            entity = SENSOR["solcast_tomorrow"]
+            load_kw = self.get_daily_consumption() / 24.0
+        # Nuosaikiai: užskaitoma tik garantuota bazinė apkrova — prognozės
+        # vidurkis perdėtai „sugeria" vidurdienio PV, kai vartojimas vakarinis.
+        load_kw = min(load_kw, CONS_BASE_KW)
+
+        detailed = self.get_state(entity, attribute="detailedForecast") or []
+        if not detailed:
+            self.log(f"[VIETA] {entity} detailedForecast nepasiekiamas — "
+                     f"vietos poreikis 0 (saugu: neiškrauna)", level="WARNING")
+            return 0.0, 0.0, 0.0
+
+        need = export = pv_total = 0.0
+        for period in detailed:
+            try:
+                start = datetime.fromisoformat(str(period["period_start"]))
+                pv = float(period.get("pv_estimate", 0)) * factor
+            except (KeyError, ValueError, TypeError):
+                continue
+            if day == "today" and start < now - timedelta(minutes=30):
+                continue
+            pv_total += pv * 0.5
+            surplus_kw = pv - load_kw
+            if surplus_kw <= 0:
+                continue
+            export += min(surplus_kw, ESO_EXPORT_LIMIT_KW) * 0.5
+            need += max(0.0, surplus_kw - ESO_EXPORT_LIMIT_KW) * 0.5
+
+        return need, export, pv_total
+
+    def publish_realization(self):
+        """
+        sensor.energy_manager_eimo_room_shortfall — kiek kWh likusios
+        šiandienos saulės (su marža) dar netilptų į laisvą baterijos vietą +
+        namus + 1 kW eksportą. > 0 reiškia nukirpimo riziką: vietą daro
+        dienos automatika (solis_daytime_discharge_eimo) ir ryto patikra.
+        """
+        soc = self.get_float("soc", default=100.0)
+        need, export_est, pv_plan = self.battery_room_needed("today")
+        headroom = max(0.0, (100.0 - soc) * KWH_PER_SOC)
+        shortfall = need - headroom
+        self.set_state(
+            "sensor.energy_manager_eimo_room_shortfall",
+            state=str(round(shortfall, 2)),
+            attributes={
+                "friendly_name": "Eimo vietos trūkumas saulei (šiandien)",
+                "unit_of_measurement": "kWh",
+                "state_class": "measurement",
+                "icon": "mdi:battery-alert" if shortfall > 0 else "mdi:battery-check",
+                "reikia_vietos_kwh": round(need, 2),
+                "laisva_vieta_kwh": round(headroom, 2),
+                "pv_planas_kwh": round(pv_plan, 2),
+                "tiketinas_eksportas_kwh": round(export_est, 2),
+                "marza": PLAN_MARGIN,
+            }
+        )
+
+    def morning_room_check(self, kwargs):
+        """
+        Ryto patikra (05:30 / 06:15 / 06:45): vakarinis target skaičiuotas
+        22:30 — jei šiandienos planas (koreguotas, su marža ir intradienos
+        santykiu) rodo, kad laisvos vietos NEUŽTEKS visai saulei realizuoti,
+        target NUŽEMINAMAS, kad naktinis slotas (recalc kas 5 min iki 07:00)
+        spėtų padaryti daugiau vietos. Tikslo niekada nekelia.
+        """
+        if self.is_storm_mode():
+            return
+        soc = self.get_float("soc")
+        need, _export, pv_plan = self.battery_room_needed("today")
+        headroom = max(0.0, (100.0 - soc) * KWH_PER_SOC)
+        self.publish_realization()
+
+        if need <= headroom + 0.3:
+            self.log(f"[RYTO VIETA] OK: reikia {need:.1f} kWh, laisva "
+                     f"{headroom:.1f} kWh (PV planas {pv_plan:.1f} kWh)")
+            return
+
+        new_target = int(round(100 - need / KWH_PER_SOC))
+        new_target = max(self.get_season_soc_min(), min(new_target, 85))
+        if new_target < int(self.last_target_soc):
+            self.log(f"[RYTO VIETA] Trūksta vietos: reikia {need:.1f} kWh, "
+                     f"laisva {headroom:.1f} kWh → target {self.last_target_soc}% "
+                     f"→ {new_target}% (PV planas {pv_plan:.1f} kWh)")
+            self.last_target_soc = new_target
+            self.save_target_soc()
+            self.publish_status()
 
     def evening_discharge_cycle(self, kwargs):
         """
-        Vakaro ciklas — perskaičiuoja tikslinį SOC rytui
-        ir nustato Solis S6 SOC minimumą.
+        Vakaro ciklas — perskaičiuoja tikslinį SOC rytui pagal REALIZAVIMO
+        kriterijų: baterijoje turi likti tiek vietos, kad visa rytojaus
+        saulė, netelpanti į namų apkrovą ir 1 kW ESO eksportą, tilptų be
+        nukirpimo. Target SOC — tik šio kriterijaus išvestinė.
+        (Iki 2026-07-14 buvo proporcinė formulė nuo „perteklius = prognozė −
+        visos paros vartojimas": ji pervertindavo namų sugertį šviesiu metu
+        ir nevertino eksporto kanalo nei prognozės nepataikymo.)
         Veikia kas 30 min nuo 18:00 iki 23:00.
         """
-        solcast_tomorrow = self.corrected_kwh(self.get_float("solcast_tomorrow"))
-        soc              = self.get_float("soc")
-        soc_min          = self.get_season_soc_min()
+        soc     = self.get_float("soc")
+        soc_min = self.get_season_soc_min()
 
-        consumption_tomorrow = self.get_daily_consumption()
+        need, export_est, pv_plan = self.battery_room_needed("tomorrow")
 
-        # Prognozuojamas perteklius rytoj
-        expected_surplus = solcast_tomorrow - consumption_tomorrow
+        target_soc = int(round(100 - need / KWH_PER_SOC))
+        target_soc = max(soc_min, min(target_soc, 85))
 
         self.log(
-            f"[VAKARO] Solcast rytoj: {solcast_tomorrow:.1f} kWh | "
-            f"Poreikis rytoj: {consumption_tomorrow:.1f} kWh | "
-            f"Perteklius: {expected_surplus:.1f} kWh | "
+            f"[VAKARO] PV planas rytoj (su marža {PLAN_MARGIN}): {pv_plan:.1f} kWh | "
+            f"eksportas dienos metu ~{export_est:.1f} kWh | "
+            f"baterijai reikia vietos: {need:.1f} kWh → target {target_soc}% | "
             f"SOC dabar: {soc:.1f}%"
         )
-
-        if expected_surplus >= BATTERY_USABLE_KWH:
-            # Labai saulėta rytoj — baterija užsikraus pilnai bet kuriuo atveju
-            # Galima išleisti iki sezono minimumo
-            target_soc = soc_min
-            self.log(
-                f"[VAKARO] Labai saulėta rytoj ({solcast_tomorrow:.1f} kWh) — "
-                f"leisk išsikrauti iki {target_soc}%"
-            )
-
-        elif expected_surplus > 0:
-            # Dalinis perteklius — proporcingas tikslas
-            # Kuo mažiau pertekliaus, tuo daugiau palikti
-            ratio = expected_surplus / BATTERY_USABLE_KWH
-            target_soc = soc_min + int((100 - soc_min) * (1 - min(ratio, 1)))
-            target_soc = max(soc_min, min(target_soc, 85))
-            self.log(
-                f"[VAKARO] Vidutinė diena ({solcast_tomorrow:.1f} kWh) — "
-                f"tikslas {target_soc}% (proporcingai)"
-            )
-
-        else:
-            # Debesuota rytoj — palik maksimumą
-            target_soc = min(85, soc)
-            self.log(
-                f"[VAKARO] Debesuota rytoj ({solcast_tomorrow:.1f} kWh) — "
-                f"neiškrauk, palik {target_soc}%"
-            )
 
         # Audros režimas — visada 100% rezervas
         if self.is_storm_mode():
             target_soc = 100
             self.log("[VAKARO] AUDROS režimas — SOC min nustatomas į 100%")
 
-        # Tik publikuojame tikslą — patį TOU iškrovimą per Modbus įjungia/atnaujina
-        # automations.yaml (solis_evening_discharge 20:00 + solis_tou_recalc_5min),
-        # skaitydamos sensor.energy_manager_eimo_target_soc.
+        # Tik publikuojame tikslą — patį slot1 iškrovimą per cloud įjungia/atnaujina
+        # packages/eimo.yaml (solis_evening_discharge_eimo 20:00 +
+        # solis_tou_recalc_eimo kas 5 min), skaitydamos
+        # sensor.energy_manager_eimo_target_soc.
         self.last_target_soc = target_soc
         self.save_target_soc()
         self.publish_status()

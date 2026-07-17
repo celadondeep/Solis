@@ -46,8 +46,10 @@ CYCLES_WARNING = 3000  # LFP baterijoms ~6000 ciklų
 
 # Tikri Solis Modbus entity (solis_s6_eh3p_*). Ciklų sensoriaus inverteris
 # neturi — ekvivalentiniai ciklai skaičiuojami iš bendros įkrovos energijos:
-# ciklai ≈ total_charge_kwh / naudingoji talpa (15.2 kWh = 16 kWh × 95%, 5–100%).
-BATTERY_USABLE_KWH = 15.2
+# ciklai ≈ total_charge_kwh / naudingoji talpa (14.4 kWh = 16 kWh × 90%,
+# ruožas 10–100%; BMS fizinis dugnas 10%, 2026-07-14 — suderinta su
+# energy_manager.py ir sensor.battery_equivalent_cycles).
+BATTERY_USABLE_KWH = 14.4
 
 SENSOR = {
     "temp":         "sensor.solis_s6_eh3p_battery_temperature_bms",
