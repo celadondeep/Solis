@@ -58,6 +58,11 @@ SENSOR = {
     "charge":       "sensor.solis_s6_eh3p_today_battery_charge_energy",
     "discharge":    "sensor.solis_s6_eh3p_today_battery_discharge_energy",
     "total_charge": "sensor.solis_s6_eh3p_total_battery_charge_energy",
+    # Inverterio savivarta iš baterijos (kWh/d.) — kai PV < apkrova,
+    # inverterio ~140 W maitinami iš baterijos, bet iškrovimo skaitliuke
+    # neužsiskaito. Pridedama prie iškrautos energijos, kad inverterio
+    # nuostoliai nebūtų priskirti baterijai.
+    "inv_self":     "sensor.inverter_self_from_battery_today",
 }
 
 # Istorijos failas
@@ -77,12 +82,17 @@ class BatteryHealth(hass.Hass):
 
         self.temp_history     = []
         self.efficiency_data  = []
+        self.day_start_soc    = None  # {"date": ..., "soc": ...} — persistuojama faile
         self.alerts_sent      = {}   # kad nesiųstų to paties alert kartotinai
 
         self.load_history()
 
         # Temperatūros stebėjimas — kas 5 min
         self.run_every(self.check_temperature, "now", 5 * 60)
+
+        # Paros pradžios SOC — 00:01, kad 23:55 būtų galima atimti
+        # baterijoje likusią energiją iš efektyvumo skaičiavimo
+        self.run_daily(self.record_day_start_soc, "00:01:00")
 
         # Efektyvumo skaičiavimas — kas dieną 23:55
         self.run_daily(self.calculate_daily_efficiency, "23:55:00")
@@ -135,6 +145,7 @@ class BatteryHealth(hass.Hass):
                 with open(HISTORY_FILE, "r") as f:
                     data = json.load(f)
                     self.efficiency_data = data.get("efficiency", [])
+                    self.day_start_soc   = data.get("day_start_soc")
                     self.log(f"Istorija įkelta: {len(self.efficiency_data)} dienų duomenys")
         except Exception as e:
             self.log(f"Istorijos įkėlimo klaida: {e}")
@@ -146,6 +157,7 @@ class BatteryHealth(hass.Hass):
             # Palikti tik paskutinius 365 įrašus
             data = {
                 "efficiency": self.efficiency_data[-365:],
+                "day_start_soc": self.day_start_soc,
                 "updated": datetime.now().isoformat()
             }
             with open(HISTORY_FILE, "w") as f:
@@ -206,25 +218,47 @@ class BatteryHealth(hass.Hass):
     #  DIENOS EFEKTYVUMO SKAIČIAVIMAS
     # ============================================================
 
+    def record_day_start_soc(self, kwargs):
+        """Įsimena SOC paros pradžioje (persistuojama istorijos faile)."""
+        soc = self.get_float("soc", default=-1.0)
+        if soc < 0:
+            self.log("[HEALTH] SOC nepasiekiamas 00:01 — paros pradžios taškas nefiksuotas.")
+            return
+        self.day_start_soc = {"date": datetime.now().date().isoformat(), "soc": soc}
+        self.save_history()
+
     def calculate_daily_efficiency(self, kwargs):
         """
-        Apskaičiuoja dienos įkrovimo/iškrovimo efektyvumą.
-        Efektyvumas = iškrauta / įkrauta * 100%
-        LFP baterija turėtų būti ~95-98%
+        Apskaičiuoja dienos įkrovimo/iškrovimo efektyvumą pagal energijos balansą:
+        Efektyvumas = (iškrauta + inverterio savivarta + ΔSOC energija) / įkrauta * 100%
+        ΔSOC narys būtinas — be jo diena, kurios pabaigoje baterija pilnesnė nei
+        ryte, atrodo kaip „nuostolis" (pvz., 2026-07-16: 18.3 įkrauta / 12.2
+        iškrauta davė fiktyvius 66.7 %, nors ~6.4 kWh tiesiog liko baterijoje).
+        LFP baterija turėtų būti ~92-98%.
         """
         charged    = self.get_float("charge")
         discharged = self.get_float("discharge")
+        inv_self   = self.get_float("inv_self")
 
         if charged < 0.5:
             self.log("[HEALTH] Per mažai įkrauta šiandien, efektyvumo neskaičiuojame.")
             return
 
-        efficiency = (discharged / charged) * 100 if charged > 0 else 0
+        today = datetime.now().date().isoformat()
+        snap = self.day_start_soc or {}
+        if snap.get("date") != today:
+            self.log("[HEALTH] Nėra paros pradžios SOC — efektyvumas šiandien neskaičiuojamas.")
+            return
+
+        soc_delta_kwh = (self.get_float("soc") - snap["soc"]) / 100 * BATTERY_CAPACITY_KWH
+        efficiency = ((discharged + inv_self + soc_delta_kwh) / charged) * 100
 
         today_data = {
-            "date":       datetime.now().date().isoformat(),
+            "date":       today,
             "charged":    round(charged, 2),
             "discharged": round(discharged, 2),
+            "inv_self":   round(inv_self, 2),
+            "soc_delta_kwh": round(soc_delta_kwh, 2),
             "efficiency": round(efficiency, 1),
             "temp_max":   round(max([h["temp"] for h in self.temp_history], default=0), 1),
             "temp_min":   round(min([h["temp"] for h in self.temp_history], default=0), 1),
@@ -235,7 +269,8 @@ class BatteryHealth(hass.Hass):
 
         self.log(
             f"[HEALTH] Dienos efektyvumas: {efficiency:.1f}% "
-            f"(įkrauta: {charged:.1f} kWh, iškrauta: {discharged:.1f} kWh)"
+            f"(įkrauta: {charged:.1f} kWh, iškrauta: {discharged:.1f} kWh, "
+            f"inverterio savivarta: {inv_self:.2f} kWh, ΔSOC: {soc_delta_kwh:+.2f} kWh)"
         )
 
         # Įspėjimas jei efektyvumas per žemas
@@ -244,7 +279,8 @@ class BatteryHealth(hass.Hass):
                 "efficiency_low",
                 f"📉 Žemas baterijos efektyvumas: {efficiency:.1f}%\n"
                 f"Norma: >{EFFICIENCY_MIN}%\n"
-                f"Įkrauta: {charged:.1f} kWh, Iškrauta: {discharged:.1f} kWh\n"
+                f"Įkrauta: {charged:.1f} kWh, Iškrauta: {discharged:.1f} kWh, "
+                f"ΔSOC: {soc_delta_kwh:+.1f} kWh\n"
                 f"Gali reikšti baterijos degradaciją.",
                 level="WARNING"
             )
