@@ -99,6 +99,20 @@ CORRECTION_ALPHA     = 0.2        # EMA glodinimo koeficientas
 CORRECTION_MIN       = 0.7
 CORRECTION_MAX       = 1.3
 
+# Valandinė korekcija: šalia globalaus koeficiento mokomi valandos-of-day
+# koeficientai (rytinis rūkas/šešėliai klysta sistemingai kitaip nei
+# vidurdienis). Mokymui naudojamas RYTINIS prognozės snapshot (04:40) —
+# vakare Solcast jau būna prisitaikęs prie dienos fakto ir klaida atrodytų
+# mažesnė nei buvo planuojant. Faktas — iš pv_today valandinių deltų
+# (get_history). Koeficientai TAIKOMI tik sukaupus HOURLY_MIN_DAYS parų;
+# iki tol visur galioja globalus koeficientas.
+HOURLY_MIN_DAYS   = 7
+HOURLY_FC_MIN_KWH = 0.05   # valandos prognozės minimumas mokymuisi (kWh)
+HOURLY_RATIO_MIN  = 0.3    # vienos paros santykio ribos (triukšmui)
+HOURLY_RATIO_MAX  = 2.0
+HOURLY_FACTOR_MIN = 0.4    # išmokto koeficiento ribos
+HOURLY_FACTOR_MAX = 1.6
+
 # Ryto įjungimas: PV galios slenkstis, nuo kurio gamyba dengia inverterio
 # savivartojimą ir laikyti jį įjungtą tampa pelninga (~100 W skirtumas
 # tarp idle 130 W ir off 30 W).
@@ -196,6 +210,10 @@ class EnergyManager(hass.Hass):
         # Korekcijos atnaujinimas kasdien 23:50 (prieš snapshot 23:55)
         self.run_daily(self.update_forecast_correction, time(23, 50))
 
+        # Rytinis šiandienos prognozės snapshot — valandinės korekcijos
+        # mokymuisi (žr. HOURLY_* konstantas)
+        self.run_daily(self.snapshot_today_forecast, time(4, 40))
+
         # Strateginis ciklas — kas 30 min; pirmą kartą po 5 sek
         self.run_in(self.strategic_cycle, 5)
         self.run_every(self.strategic_cycle, "now", 30 * 60)
@@ -274,8 +292,8 @@ class EnergyManager(hass.Hass):
         soc_min       = self.get_season_soc_min()
         storm         = self.is_storm_mode()
         boiler_state  = self.get_state(SENSOR["boiler_switch"])
-        solcast_t     = self.corrected_kwh(self.get_float("solcast_today"))
-        solcast_tm    = self.corrected_kwh(self.get_float("solcast_tomorrow"))
+        solcast_t     = self.corrected_remaining_today()
+        solcast_tm    = self.corrected_tomorrow()
 
         # PASTABA: sensor.energy_manager_status priklauso template sensoriui
         # (configuration.yaml — rodo inverterio režimą). Sprendimo tekstas
@@ -504,6 +522,147 @@ class EnergyManager(hass.Hass):
         """Pritaiko adaptyvų korekcijos koeficientą Solcast prognozei."""
         return value * self.correction.get("factor", 1.0)
 
+    def hourly_ready(self):
+        return self.correction.get("hourly_days", 0) >= HOURLY_MIN_DAYS
+
+    def hourly_factor(self, hour):
+        """Valandos koeficientas, kol nesubrendęs — globalus."""
+        if self.hourly_ready():
+            return float(self.correction.get("hourly_factors", {})
+                         .get(str(hour), self.correction.get("factor", 1.0)))
+        return self.correction.get("factor", 1.0)
+
+    def _corrected_series_kwh(self, entity_key, only_future):
+        """kWh suma iš detailedForecast su valandiniais koeficientais.
+        None — jei atributo nėra (tada kviečiantis krenta į skaliarinį kelią)."""
+        detailed = self.get_state(SENSOR[entity_key], attribute="detailedForecast")
+        if not detailed:
+            return None
+        now = datetime.now().astimezone()
+        total = 0.0
+        for period in detailed:
+            try:
+                start = datetime.fromisoformat(period["period_start"]).astimezone()
+                if only_future and start + timedelta(minutes=30) <= now:
+                    continue
+                total += (float(period.get("pv_estimate", 0)) * 0.5
+                          * self.hourly_factor(start.hour))
+            except (ValueError, TypeError, KeyError):
+                continue
+        return total
+
+    def corrected_remaining_today(self):
+        """Likusi šiandienos prognozė kWh (valandiniai koeficientai, jei subrendę)."""
+        if self.hourly_ready():
+            v = self._corrected_series_kwh("solcast_today_total", only_future=True)
+            if v is not None:
+                return v
+        return self.corrected_kwh(self.get_float("solcast_today"))
+
+    def corrected_tomorrow(self):
+        """Rytojaus prognozė kWh (valandiniai koeficientai, jei subrendę)."""
+        if self.hourly_ready():
+            v = self._corrected_series_kwh("solcast_tomorrow", only_future=False)
+            if v is not None:
+                return v
+        return self.corrected_kwh(self.get_float("solcast_tomorrow"))
+
+    def snapshot_today_forecast(self, kwargs):
+        """04:40: įšaldo šiandienos pusvalandinę prognozę mokymuisi 23:50."""
+        detailed = self.get_state(SENSOR["solcast_today_total"],
+                                  attribute="detailedForecast")
+        if not detailed:
+            self.log("[KOREKCIJA] Snapshot nepavyko — nėra detailedForecast",
+                     level="WARNING")
+            return
+        today = datetime.now().astimezone().date().isoformat()
+        periods = {}
+        for period in detailed:
+            try:
+                start = datetime.fromisoformat(period["period_start"]).astimezone()
+                if start.date().isoformat() == today:
+                    periods[start.isoformat()] = float(period.get("pv_estimate", 0))
+            except (ValueError, TypeError, KeyError):
+                continue
+        self.correction["snapshot"] = {"date": today, "periods": periods}
+        self.save_correction()
+        self.log(f"[KOREKCIJA] Rytinis snapshot: {len(periods)} periodų")
+
+    def hourly_actual_pv(self):
+        """Šiandienos gamyba pavalandžiui {val: kWh} iš kumuliacinio pv_today
+        (recorder istorija). Valandos be įrašų praleidžiamos."""
+        start = datetime.now().astimezone().replace(hour=0, minute=0,
+                                                    second=0, microsecond=0)
+        try:
+            hist = self.get_history(entity_id=SENSOR["pv_today"], start_time=start)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[KOREKCIJA] get_history klaida: {e}", level="WARNING")
+            return {}
+        if not hist or not hist[0]:
+            return {}
+        # Paskutinė kumuliacinė reikšmė kiekvienoje valandoje (chronologiškai
+        # paskutinis įrašas laimi), tada deltos tarp valandų.
+        last_in_hour = {}
+        for s in hist[0]:
+            try:
+                t = datetime.fromisoformat(s["last_changed"]).astimezone()
+                v = float(s["state"])
+            except (ValueError, TypeError, KeyError):
+                continue
+            if t >= start:
+                last_in_hour[t.hour] = v
+        per_hour = {}
+        prev = 0.0
+        for h in range(24):
+            if h in last_in_hour:
+                per_hour[h] = max(0.0, last_in_hour[h] - prev)
+                prev = last_in_hour[h]
+        return per_hour
+
+    def update_hourly_factors(self):
+        """23:50: EMA atnaujina valandinius koeficientus pagal snapshot vs faktą."""
+        today = datetime.now().astimezone().date().isoformat()
+        snap = self.correction.get("snapshot") or {}
+        periods = snap.get("periods") if snap.get("date") == today else None
+        source = "snapshot"
+        if not periods:
+            # Fallback — vakarinis atributas (jau prisitaikęs, mokymas silpnesnis)
+            source = "vakarinis atributas"
+            detailed = self.get_state(SENSOR["solcast_today_total"],
+                                      attribute="detailedForecast") or []
+            periods = {}
+            for period in detailed:
+                try:
+                    start = datetime.fromisoformat(period["period_start"]).astimezone()
+                    if start.date().isoformat() == today:
+                        periods[start.isoformat()] = float(period.get("pv_estimate", 0))
+                except (ValueError, TypeError, KeyError):
+                    continue
+        if not periods:
+            return
+        fc_by_hour = {}
+        for iso, kw in periods.items():
+            h = datetime.fromisoformat(iso).hour
+            fc_by_hour[h] = fc_by_hour.get(h, 0.0) + kw * 0.5
+        actual = self.hourly_actual_pv()
+        if not actual:
+            return
+        factors = self.correction.setdefault("hourly_factors", {})
+        updated = 0
+        for h, fc in sorted(fc_by_hour.items()):
+            if fc < HOURLY_FC_MIN_KWH or h not in actual:
+                continue
+            ratio = max(HOURLY_RATIO_MIN, min(actual[h] / fc, HOURLY_RATIO_MAX))
+            old = float(factors.get(str(h), self.correction.get("factor", 1.0)))
+            new = old * (1 - CORRECTION_ALPHA) + ratio * CORRECTION_ALPHA
+            factors[str(h)] = round(
+                max(HOURLY_FACTOR_MIN, min(new, HOURLY_FACTOR_MAX)), 3)
+            updated += 1
+        if updated:
+            self.correction["hourly_days"] = self.correction.get("hourly_days", 0) + 1
+            self.log(f"[KOREKCIJA] Valandiniai koeficientai ({source}): "
+                     f"atnaujinta {updated} val., diena #{self.correction['hourly_days']}")
+
     def update_forecast_correction(self, kwargs):
         """
         Kasdien 23:50: atnaujina korekcijos koeficientą pagal šios dienos
@@ -525,6 +684,7 @@ class EnergyManager(hass.Hass):
 
         self.correction["factor"] = round(new, 4)
         self.correction["days"]   = self.correction.get("days", 0) + 1
+        self.update_hourly_factors()
         self.save_correction()
 
         self.log(f"[KOREKCIJA] Faktas {actual:.1f} / prognozė {forecast:.1f} "
@@ -557,10 +717,10 @@ class EnergyManager(hass.Hass):
             detailed = self.get_state(entity, attribute="detailedForecast")
             if not detailed:
                 return None
-            factor = self.correction.get("factor", 1.0)
             for period in detailed:
+                start = datetime.fromisoformat(period["period_start"])
+                factor = self.hourly_factor(start.astimezone().hour)
                 if float(period.get("pv_estimate", 0)) * factor >= MORNING_PV_THRESHOLD_KW:
-                    start = datetime.fromisoformat(period["period_start"])
                     on_time = start - timedelta(minutes=MORNING_ON_MARGIN_MIN)
                     # Jei laikas jau praėjęs (pvz. skaičiuojama po aušros) —
                     # įjungti tuoj pat, kad time-trigger dar suveiktų.
@@ -592,7 +752,7 @@ class EnergyManager(hass.Hass):
         # tikslinio SOC iki 95%? Jei taip — kiekviena naktį išleista kWh būtų
         # šiaip eksportuota (vertė = pardavimo kaina). Jei ne — jos vertė =
         # pirkimo kaina (rytoj vakare jos truks ir teks pirkti).
-        tomorrow_corr  = self.corrected_kwh(self.get_float("solcast_tomorrow"))
+        tomorrow_corr  = self.corrected_tomorrow()
         need_tomorrow  = self.get_daily_consumption()
         surplus_tom    = tomorrow_corr - need_tomorrow
         headroom_kwh   = max(0.0, (SOC_TARGET_CHARGE - target_soc) * KWH_PER_SOC)
@@ -684,6 +844,9 @@ class EnergyManager(hass.Hass):
                 "dienos": self.correction.get("days", 0),
                 "atnaujinta": self.correction.get("updated"),
                 "rytoj_koreguota_kwh": round(tomorrow_corr, 1),
+                "valandiniai": self.correction.get("hourly_factors", {}),
+                "valandiniu_dienos": self.correction.get("hourly_days", 0),
+                "valandiniai_taikomi": self.hourly_ready(),
             }
         )
 
@@ -760,8 +923,8 @@ class EnergyManager(hass.Hass):
         Strateginis ciklas — skaičiuoja energijos balansą
         ir nustato ar boileris apskritai gali veikti šiandien.
         """
-        solcast_today    = self.corrected_kwh(self.get_float("solcast_today"))
-        solcast_tomorrow = self.corrected_kwh(self.get_float("solcast_tomorrow"))
+        solcast_today    = self.corrected_remaining_today()
+        solcast_tomorrow = self.corrected_tomorrow()
         soc              = self.get_float("soc")
 
         consumption_today    = self.get_consumption_remaining_today()
@@ -930,7 +1093,9 @@ class EnergyManager(hass.Hass):
         day: "today" (nuo dabar iki paros galo) arba "tomorrow" (visa para).
         Grąžina (reikia_kwh, eksportas_kwh, pv_plan_kwh).
         """
-        factor = self.correction.get("factor", 1.0) * PLAN_MARGIN
+        # Valandos koeficientas taikomas kiekvienam periodui atskirai
+        # (hourly_factor), čia — tik bendroji marža ir intradienos santykis.
+        margin = PLAN_MARGIN
         now = datetime.now().astimezone()
 
         if day == "today":
@@ -939,7 +1104,7 @@ class EnergyManager(hass.Hass):
             # 07-13: faktas 128 %), likusi diena planuojama pagal faktą.
             intraday = self.get_sensor_float("sensor.solcast_intraday_ratio",
                                              default=1.0)
-            factor *= max(intraday, 1.0)   # tik didina — mažėjimą dengia marža
+            margin *= max(intraday, 1.0)   # tik didina — mažėjimą dengia marža
             cons = self.get_consumption_remaining_today()
             hours_left = max(1.0, 24.0 - now.hour - now.minute / 60.0)
             load_kw = cons / hours_left
@@ -960,7 +1125,8 @@ class EnergyManager(hass.Hass):
         for period in detailed:
             try:
                 start = datetime.fromisoformat(str(period["period_start"]))
-                pv = float(period.get("pv_estimate", 0)) * factor
+                pv = (float(period.get("pv_estimate", 0))
+                      * self.hourly_factor(start.astimezone().hour) * margin)
             except (KeyError, ValueError, TypeError):
                 continue
             if day == "today" and start < now - timedelta(minutes=30):
