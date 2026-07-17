@@ -43,6 +43,13 @@ HISTORY_MAX_DAYS   = 120
 HISTORY_MIN_DAYS   = 5    # nuo kada mediana pakeičia EMA
 MEDIAN_WINDOW_DAYS = 14   # medianos langas daily_avg skaičiavimui
 
+# Valandinio profilio mokymasis iš vakardienos kumuliacinio paros sensoriaus
+# (get_history deltos pavalandžiui, 00:05 cikle). Lėtas EMA — paros vidaus
+# pasiskirstymas triukšmingas (virdulys/skalbimas), profilis turi kisti lėtai.
+PROFILE_ALPHA      = 0.10
+PROFILE_MIN_TOTAL  = 1.0   # kWh — mažiau reiškia nepilną parą, nesimokom
+PROFILE_MIN_HOURS  = 20    # bent tiek valandų su duomenimis
+
 # Orų kontekstas (Open-Meteo, be API rakto) — Šeškinių k., Vilkaviškio r.
 # Kol kas temperatūros tik KAUPIAMOS istorijoje (t_mean/t_max prie kiekvienos
 # paros); prognozė jų dar nenaudoja — orų koeficientą įjungsime, kai šildymo
@@ -94,6 +101,9 @@ SENSOR = {
     # Vakardienos paros suvartojimas (kWh) — patikimas dienos vidurkio šaltinis,
     # atsparus AppDaemon restartams (nepriklauso nuo 15 min matavimų tęstinumo).
     "daily_consumption": "sensor.solis_s6_eh3p_yesterday_energy_consumption",
+    # Šiandienos kumuliacinis paros suvartojimas (resetinasi vidurnaktį) —
+    # valandinio profilio mokymuisi iš recorder istorijos.
+    "today_consumption": "sensor.solis_s6_eh3p_today_energy_consumption",
     "season":            "input_select.energy_season",
 }
 
@@ -435,6 +445,9 @@ class ConsumptionModel(hass.Hass):
         # Nepavykus — tyliai praleidžiama, modelio atnaujinimo tai neblokuoja.
         self.enrich_history_with_weather(history)
 
+        # Valandinio profilio EMA mokymasis iš vakardienos valandinių deltų
+        self.update_hourly_profile()
+
         if not self.recompute_from_history():
             # Istorija dar trumpa — senas EMA kelias. Prieš įtraukiant
             # pašaliname savaitės dienos ir sezono įtaką (deseasonalize),
@@ -452,6 +465,70 @@ class ConsumptionModel(hass.Hass):
         self.model["data_days"] = self.model.get("data_days", 0) + 1
         self.save_model()
         self.daily_readings = []
+
+    def hourly_consumption_yesterday(self):
+        """Vakardienos suvartojimas pavalandžiui {0..23: kWh} iš kumuliacinio
+        sensoriaus recorder istorijos. Tuščias dict — jei duomenų nepakanka.
+        Veikia ir su paros (resetinasi 00:00), ir su monotoniniu skaitliuku —
+        atskaita nuo pirmos lango reikšmės, kritimai (reset) apkerpami iki 0."""
+        day_start = (datetime.now().astimezone().replace(
+            hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1))
+        day_end = day_start + timedelta(days=1)
+        try:
+            hist = self.get_history(entity_id=SENSOR["today_consumption"],
+                                    start_time=day_start, end_time=day_end)
+        except Exception as e:  # noqa: BLE001
+            self.log(f"[PROFILIS] get_history klaida: {e}", level="WARNING")
+            return {}
+        if not hist or not hist[0]:
+            return {}
+        points = []
+        for s in hist[0]:
+            try:
+                t = datetime.fromisoformat(s["last_changed"]).astimezone()
+                v = float(s["state"])
+            except (ValueError, TypeError, KeyError):
+                continue
+            if day_start <= t < day_end:
+                points.append((t, v))
+        if len(points) < 2:
+            return {}
+        points.sort()
+        last_in_hour = {}
+        for t, v in points:
+            last_in_hour[t.hour] = v
+        per_hour = {}
+        prev = points[0][1]
+        for h in range(24):
+            if h in last_in_hour:
+                per_hour[h] = max(0.0, last_in_hour[h] - prev)
+                prev = last_in_hour[h]
+        return per_hour
+
+    def update_hourly_profile(self):
+        """EMA atnaujina valandinį profilį pagal vakardienos faktą ir
+        normalizuoja (vidurkis = 1), kad predict_remaining_today semantika
+        nesikeistų."""
+        per_hour = self.hourly_consumption_yesterday()
+        total = sum(per_hour.values())
+        if len(per_hour) < PROFILE_MIN_HOURS or total < PROFILE_MIN_TOTAL:
+            self.log(f"[PROFILIS] Nepakanka duomenų ({len(per_hour)} val., "
+                     f"{total:.1f} kWh) — profilis nekeičiamas")
+            return
+        profile = self.model.get("hourly_profile") or self.default_hourly_profile()
+        mean_kwh = total / len(per_hour)
+        for h, kwh in per_hour.items():
+            target = kwh / mean_kwh
+            old = float(profile.get(str(h), 1.0))
+            profile[str(h)] = old * (1 - PROFILE_ALPHA) + target * PROFILE_ALPHA
+        mean_f = sum(float(v) for v in profile.values()) / len(profile)
+        if mean_f > 0:
+            for k in profile:
+                profile[k] = round(float(profile[k]) / mean_f, 3)
+        self.model["hourly_profile"] = profile
+        self.model["profile_days"] = self.model.get("profile_days", 0) + 1
+        self.log(f"[PROFILIS] Valandinis profilis atnaujintas "
+                 f"({len(per_hour)} val., diena #{self.model['profile_days']})")
 
     def fetch_daily_temps(self):
         """Grąžina {"YYYY-MM-DD": (t_mean, t_max)} ~92 praėjusioms paroms ir
