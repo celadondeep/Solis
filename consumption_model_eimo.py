@@ -31,6 +31,7 @@ from statistics import median
 import json
 import os
 import csv
+import urllib.request
 from collections import defaultdict
 
 
@@ -39,9 +40,25 @@ from collections import defaultdict
 # ============================================================
 
 # Paros istorijos parametrai (žr. recompute_from_history)
-HISTORY_MAX_DAYS   = 28   # kiek parų saugoti modelio faile
+# 120 d. (buvo 28): orų įtakos mokymuisi reikia sezoninio ilgio istorijos su
+# temperatūromis; savaitės koeficientams daugiau duomenų irgi tik į naudą.
+HISTORY_MAX_DAYS   = 120
 HISTORY_MIN_DAYS   = 5    # nuo kada mediana pakeičia EMA
 MEDIAN_WINDOW_DAYS = 14   # medianos langas daily_avg skaičiavimui
+
+# Orų kontekstas (Open-Meteo, be API rakto) — Gražiškiai, Vilkaviškio r.
+# Kol kas temperatūros tik KAUPIAMOS istorijoje (t_mean/t_max prie kiekvienos
+# paros); prognozė jų dar nenaudoja — orų koeficientą įjungsime, kai šildymo
+# sezonas duos realų signalą (vasaros koreliacija ~+0.1, triukšmas).
+WEATHER_LAT = 54.46831
+WEATHER_LON = 22.92079
+# forecast API su past_days dengia ir praėjusias paras (archive API vėluoja ~5 d.)
+WEATHER_URL = (
+    "https://api.open-meteo.com/v1/forecast"
+    f"?latitude={WEATHER_LAT}&longitude={WEATHER_LON}"
+    "&daily=temperature_2m_mean,temperature_2m_max"
+    "&past_days=92&forecast_days=2&timezone=Europe%2FVilnius"
+)
 
 # Keliai per __file__ — AppDaemon konteineryje /config rodo į addon'o vidinį
 # katalogą (ne HA config), todėl hardcoded /config/appdaemon/... ten neegzistuoja
@@ -418,6 +435,10 @@ class ConsumptionModel(hass.Hass):
         history.sort(key=lambda h: h["date"])
         del history[:-HISTORY_MAX_DAYS]
 
+        # Prie parų be temperatūros pridedame t_mean/t_max (žr. WEATHER_URL).
+        # Nepavykus — tyliai praleidžiama, modelio atnaujinimo tai neblokuoja.
+        self.enrich_history_with_weather(history)
+
         if not self.recompute_from_history():
             # Istorija dar trumpa — senas EMA kelias. Prieš įtraukiant
             # pašaliname savaitės dienos ir sezono įtaką (deseasonalize),
@@ -435,6 +456,37 @@ class ConsumptionModel(hass.Hass):
         self.model["data_days"] = self.model.get("data_days", 0) + 1
         self.save_model()
         self.daily_readings = []
+
+    def fetch_daily_temps(self):
+        """Grąžina {"YYYY-MM-DD": (t_mean, t_max)} ~92 praėjusioms paroms ir
+        artimiausioms 2 d. iš Open-Meteo. Tuščias dict — jei tinklas nepasiekiamas."""
+        try:
+            with urllib.request.urlopen(WEATHER_URL, timeout=15) as resp:
+                daily = json.load(resp)["daily"]
+            return {
+                day: (daily["temperature_2m_mean"][i], daily["temperature_2m_max"][i])
+                for i, day in enumerate(daily["time"])
+            }
+        except Exception as e:  # tinklo/API klaida neturi versti update_model
+            self.log(f"[MODEL-EIMO] Orų duomenų nepavyko gauti: {e}", level="WARNING")
+            return {}
+
+    def enrich_history_with_weather(self, history):
+        temps = self.fetch_daily_temps()
+        if not temps:
+            return
+        added = 0
+        for h in history:
+            if "t_mean" in h:
+                continue
+            t = temps.get(h.get("date"))
+            if t and t[0] is not None:
+                h["t_mean"] = round(t[0], 1)
+                if t[1] is not None:
+                    h["t_max"] = round(t[1], 1)
+                added += 1
+        if added:
+            self.log(f"[MODEL-EIMO] Temperatūros pridėtos {added} paroms")
 
     def recompute_from_history(self):
         """
