@@ -62,7 +62,10 @@ CONS_BASE_KW         = 0.3
 # įrankis). Nuostoliai asimetriški: nukirpta kWh prarandama 100 %, o per
 # daug paruošta vieta kainuoja tik naktinio eksporto round-trip ~8 %
 # (ESO pasaugojimo banke kWh vertės nepraranda).
-PLAN_MARGIN          = 1.15
+# 1.25 (buvo 1.15; 2026-07-18 vartotojo nurodymas: „geriau daugiau talpos
+# atlaisvink nei mažiau" — Solcast sistemingai kuklina: korekcija +2.6 %,
+# intradienos santykiai 1.07–1.09, pasitaiko 110–128 % dienų).
+PLAN_MARGIN          = 1.25
 # Inverterio savivartojimas. Solis sensoriai (household_load_power,
 # yesterday_energy_consumption) jo NEMATO — matuojama tik namų apkrova, todėl
 # poreikio prognozės be šios pataisos ~1.2–1.5 kWh/naktį per mažos.
