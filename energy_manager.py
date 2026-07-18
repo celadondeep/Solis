@@ -68,6 +68,15 @@ CONS_BASE_KW         = 0.3
 # atlaisvink nei mažiau" — Solcast sistemingai kuklina: korekcija +2.6 %,
 # intradienos santykiai 1.07–1.09, pasitaiko 110–128 % dienų).
 PLAN_MARGIN          = 1.25
+
+# SVEIKATOS ZONA (2026-07-18, vartotojo tikslas): nuosaikią dieną kaupiklis
+# eksploatuojamas 20–80 % ruože (LFP senėjimas mažiausias viduryje):
+# naktinis dugnas ≥ 20 %, dienos viršūnė skutama ties ~80 % (cut-off
+# automations solis_daytime_feedin_tou). Aukštos gamybos dieną (koreguota
+# prognozė > BIG_DAY_KWH) taisyklė NEGALIOJA — pilnas diapazonas nuo dugno
+# iki 100 %, nes realizavimas svarbiau.
+BIG_DAY_KWH          = 28.0
+HEALTH_SOC_MIN       = 20
 # Inverterio savivartojimas. Solis sensoriai (household_load_power,
 # yesterday_energy_consumption) jo NEMATO — matuojama tik namų apkrova, todėl
 # poreikio prognozės be šios pataisos ~1.2–1.5 kWh/naktį per mažos.
@@ -1193,6 +1202,9 @@ class EnergyManager(hass.Hass):
 
         new_target = int(round(100 - need / KWH_PER_SOC))
         new_target = max(self.get_season_soc_min(), min(new_target, 85))
+        # Sveikatos zona: nuosaikią dieną žemiau 20 % nelipti net darant vietą.
+        if self.corrected_remaining_today() <= BIG_DAY_KWH:
+            new_target = max(new_target, HEALTH_SOC_MIN)
         if new_target < int(self.last_target_soc):
             self.log(f"[RYTO VIETA] Trūksta vietos: reikia {need:.1f} kWh, "
                      f"laisva {headroom:.1f} kWh → target {self.last_target_soc}% "
@@ -1220,6 +1232,14 @@ class EnergyManager(hass.Hass):
 
         target_soc = int(round(100 - need / KWH_PER_SOC))
         target_soc = max(soc_min, min(target_soc, 85))
+
+        # Sveikatos zona: nuosaikiai rytdienai dugnas ne žemiau 20 %.
+        tomorrow_corr = self.corrected_tomorrow()
+        if tomorrow_corr <= BIG_DAY_KWH and target_soc < HEALTH_SOC_MIN:
+            self.log(f"[VAKARO] Nuosaiki diena rytoj ({tomorrow_corr:.1f} kWh "
+                     f"<= {BIG_DAY_KWH}) — sveikatos zona: target "
+                     f"{target_soc}% -> {HEALTH_SOC_MIN}%")
+            target_soc = HEALTH_SOC_MIN
 
         self.log(
             f"[VAKARO] PV planas rytoj (su marža {PLAN_MARGIN}): {pv_plan:.1f} kWh | "
