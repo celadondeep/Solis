@@ -131,7 +131,6 @@ HOURLY_FACTOR_MAX = 1.6
 # savivartojimą ir laikyti jį įjungtą tampa pelninga (~100 W skirtumas
 # tarp idle 130 W ir off 30 W).
 MORNING_PV_THRESHOLD_KW = 0.1     # inverterį įjungti ties prognozuojamu >=100 W
-MORNING_ON_MARGIN_MIN   = 0       # nebenaudojamas: kirtimas interpoliuojamas minutėmis
 
 # Dinaminis nakties planas (2026-09-09)
 # Planas regeneruojamas kas 5 min pagal realų SOC ir naujausią PV prognozę.
