@@ -1,0 +1,52 @@
+name: Python validation
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "energy_manager.py"
+      - "energy_manager_eimo.py"
+      - "consumption_model.py"
+      - "consumption_model_eimo.py"
+      - ".github/workflows/python-validation.yml"
+  pull_request:
+    paths:
+      - "energy_manager.py"
+      - "energy_manager_eimo.py"
+      - "consumption_model.py"
+      - "consumption_model_eimo.py"
+      - ".github/workflows/python-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile AppDaemon modules
+        run: |
+          python3 -m py_compile \
+            energy_manager.py \
+            energy_manager_eimo.py \
+            consumption_model.py \
+            consumption_model_eimo.py
+      - name: Verify dynamic night planner markers
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          home = Path("energy_manager.py").read_text()
+          eimo = Path("energy_manager_eimo.py").read_text()
+          for text in (home, eimo):
+              assert "def night_plan_cycle" in text
+              assert "NIGHT_PLAN_INTERVAL_S" in text
+              assert "plan_generated_at" in text
+              assert "plan_valid_until" in text
+          assert 'NIGHT_PLAN_SLEEP_ENABLED   = True' in home
+          assert 'NIGHT_CONTROL_MIN_SOC      = 12' in home
+          assert 'NIGHT_PLAN_SLEEP_ENABLED   = False' in eimo
+          assert 'NIGHT_CONTROL_MIN_SOC      = 6' in eimo
+          print("Dynamic night planner invariants OK")
+          PY
