@@ -133,6 +133,18 @@ MORNING_ON_MARGIN_MIN   = 30      # įjungti tiek min anksčiau nei slenkstis
                                   # (30, nes Solcast prognozė pusvalandinė —
                                   # perkirtimas gali būti periodo pradžioje)
 
+# Dinaminis nakties planas (2026-09-09)
+# Planas regeneruojamas kas 5 min pagal realų SOC ir naujausią PV prognozę.
+NIGHT_PLAN_INTERVAL_S      = 5 * 60
+NIGHT_PLAN_START_HOUR      = 18
+NIGHT_EXEC_START_HOUR      = 19
+NIGHT_EXEC_START_MINUTE    = 30
+NIGHT_DAWN_BASE_LOAD_KW    = 0.30
+NIGHT_DAWN_MARGIN_HOURS    = 0.20
+NIGHT_DONE_SOC_TOL         = 1.0
+NIGHT_CONTROL_MIN_SOC      = 12
+NIGHT_PLAN_SLEEP_ENABLED   = True
+
 # Sezoniniai SOC minimumai %
 SEASON_SOC_MIN = {
     "žiema":      80,
@@ -210,6 +222,7 @@ class EnergyManager(hass.Hass):
         self.last_decision       = "Paleidžiama..."
         self.last_balance        = 0.0
         self.last_surplus        = 0.0
+        self.night_plan            = {}
         # Startinis tikslas: atstatomas iš failo, jei vakar/šiandien jau buvo
         # apskaičiuotas (kitaip restartas vakare užšaldytų 100% iki kito 18:00).
         # Jei failo nėra ar jis pasenęs — saugus 100% = „neiškrauti nieko".
@@ -238,6 +251,12 @@ class EnergyManager(hass.Hass):
         # kas 30 min, kai boileris neaktyvus ir taktinis ciklas išeina anksčiau
         # nepasiekęs publish_status. Boilerio valdymo logikos neliečia.
         self.run_every(self.refresh_publish, "now+20", 5 * 60)
+
+        # Dinaminis nakties planas — ne vienkartinis vakaro sprendimas.
+        # Kas 5 min perskaičiuoja targetą ir vykdymo fazę pagal realų SOC,
+        # naujausią Solcast, ryto PV pradžią ir fizinį 1 kW eksporto kanalą.
+        self.run_in(self.night_plan_cycle, 12)
+        self.run_every(self.night_plan_cycle, "now+30", NIGHT_PLAN_INTERVAL_S)
 
         # Vakaro iškrovimo ciklas — kas 30 min nuo 18:00 iki 23:00
         self.run_daily(self.evening_discharge_cycle, time(18, 0))
@@ -371,6 +390,10 @@ class EnergyManager(hass.Hass):
                 "device_class": "battery",
                 "planner_heartbeat": planner_heartbeat,
                 "planner_interval_s": 300,
+                "plan_generated_at": self.night_plan.get("generated_at"),
+                "plan_valid_until": self.night_plan.get("valid_until"),
+                "plan_trusted": self.night_plan.get("trusted", False),
+                "night_stage": self.night_plan.get("stage", "UNKNOWN"),
             }
         )
 
@@ -708,6 +731,184 @@ class EnergyManager(hass.Hass):
 
         self.log(f"[KOREKCIJA] Faktas {actual:.1f} / prognozė {forecast:.1f} "
                  f"= {ratio:.2f} → koeficientas {old:.3f} → {new:.3f}")
+
+    # ============================================================
+    #  DINAMINIS NAKTIES PLANAS
+    # ============================================================
+
+    def _night_plan_target(self, now):
+        """Grąžina (target, need, export_est, pv_plan, forecast, day) arba None.
+
+        Iki vidurnakčio planuojama rytojaus gamyba, po vidurnakčio — šiandienos.
+        Planas laikomas patikimu tik kai yra detailedForecast ir apskaičiuojama
+        reali ryto PV pradžia.
+        """
+        day = "today" if now.hour < 12 else "tomorrow"
+        entity = SENSOR["solcast_today_total"] if day == "today" else SENSOR["solcast_tomorrow"]
+        detailed = self.get_state(entity, attribute="detailedForecast")
+        if not detailed:
+            return None
+
+        need, export_est, pv_plan = self.battery_room_needed(day)
+        forecast = self.corrected_remaining_today() if day == "today" else self.corrected_tomorrow()
+
+        target = int(round(100 - need / KWH_PER_SOC))
+        target = max(self.get_season_soc_min(), min(target, 85))
+        if forecast <= BIG_DAY_KWH:
+            target = max(target, HEALTH_SOC_MIN)
+
+        # Vykdymo fizinė riba: Modbus Namams >=12 %, Eimo cloud >=6 %.
+        target = max(target, NIGHT_CONTROL_MIN_SOC)
+        if self.is_storm_mode():
+            target = 100
+
+        return target, need, export_est, pv_plan, forecast, day
+
+    def _night_morning_reference(self, now):
+        """Ryto PV pradžios orientyras. None reiškia nepatikimą planą."""
+        morning = self.get_morning_on_time()
+        if morning is None:
+            return None
+        # get_morning_on_time gali grąžinti laiką po kelių minučių, jei PV
+        # pradžia jau praėjo. Nakties planui tai reiškia, kad naktis baigiasi.
+        return morning
+
+    def night_plan_cycle(self, kwargs):
+        """Regeneruoja nakties planą kas 5 min.
+
+        Namai:
+          EVENING_BOOST — baterija aktyviai dengia namus + iki 1 kW eksportas,
+          kol pasiekiamas sleep_soc.
+          SLEEP — inverteris gali būti OFF; baterija laikoma virš žemo targeto.
+          DAWN_FINISH — trumpas finalinis iškrovimas prieš PV pradžią.
+          DONE — galutinis target pasiektas.
+        """
+        now = datetime.now().astimezone()
+        generated_at = now.isoformat(timespec="seconds")
+        soc = self.get_float("soc", default=100.0)
+
+        target_data = self._night_plan_target(now)
+        morning = self._night_morning_reference(now)
+
+        active_window = now.hour >= NIGHT_PLAN_START_HOUR or now.hour < 8
+        exec_start = now.replace(
+            hour=NIGHT_EXEC_START_HOUR,
+            minute=NIGHT_EXEC_START_MINUTE,
+            second=0,
+            microsecond=0,
+        )
+
+        trusted = target_data is not None and morning is not None
+        if not active_window:
+            stage = "DAY"
+            target = int(self.last_target_soc)
+            sleep_soc = target
+            energy_remaining = 0.0
+            dawn_start = None
+            need = export_est = pv_plan = forecast = 0.0
+            plan_day = "today"
+            reason = "Ne nakties planavimo langas"
+        elif not trusted:
+            stage = "HOLD"
+            target = int(self.last_target_soc)
+            sleep_soc = target
+            energy_remaining = max(0.0, (soc - target) * KWH_PER_SOC)
+            dawn_start = None
+            need = export_est = pv_plan = forecast = 0.0
+            plan_day = "unknown"
+            reason = "Trūksta patikimos Solcast / ryto PV informacijos"
+        else:
+            target, need, export_est, pv_plan, forecast, plan_day = target_data
+            target = int(target)
+
+            # Targetas yra dinaminis: jei forecast pasikeitė, naujas targetas
+            # iškart tampa vykdomu planu. Failą rašome tik realiai pasikeitus.
+            if target != int(self.last_target_soc):
+                self.log(
+                    f"[NIGHT PLAN] target {self.last_target_soc}% -> {target}% "
+                    f"({plan_day}, PV {forecast:.1f} kWh)"
+                )
+                self.last_target_soc = target
+                self.save_target_soc()
+
+            energy_remaining = max(0.0, (soc - target) * KWH_PER_SOC)
+
+            # Žemą targetą nepasiekiame vakare per anksti: iki HEALTH_SOC_MIN
+            # iškrauname vakaro pike, tada miegame ir likutį užbaigiame prieš PV.
+            sleep_soc = max(target, HEALTH_SOC_MIN)
+
+            # Konservatyvus priešaušrio tempas: 1 kW eksportas + bazinė namų
+            # apkrova + inverterio savivartojimas. Realaus SOC feedback'as kas
+            # 5 min pats pakoreguoja startą.
+            dawn_kw = ESO_EXPORT_LIMIT_KW + NIGHT_DAWN_BASE_LOAD_KW + INVERTER_SELF_KW
+            dawn_energy = max(0.0, (soc - target) * KWH_PER_SOC)
+            dawn_hours = (dawn_energy / max(dawn_kw, 0.1)) + NIGHT_DAWN_MARGIN_HOURS
+            dawn_start = morning - timedelta(hours=dawn_hours)
+
+            if self.is_storm_mode():
+                stage = "HOLD"
+                reason = "Audros / ESO rezervo režimas"
+            elif now < exec_start and now.hour >= NIGHT_PLAN_START_HOUR:
+                stage = "WAIT_EVENING"
+                reason = "Laukiama 19:30, kad nesikirstų su dienos eksporto langu"
+            elif now >= morning:
+                stage = "DAY"
+                reason = "Prasidėjo PV gamybos langas"
+            elif soc <= target + NIGHT_DONE_SOC_TOL:
+                stage = "DONE"
+                reason = "Galutinis rytinis SOC targetas pasiektas"
+            elif soc > sleep_soc + NIGHT_DONE_SOC_TOL:
+                stage = "EVENING_BOOST"
+                reason = "Vakaro apkrova + 1 kW eksportas greičiausiai paruošia vietą"
+            elif target < sleep_soc and now < dawn_start:
+                stage = "SLEEP"
+                reason = "Likutį efektyviau užbaigti trumpu priešaušrio langu"
+            elif target < sleep_soc:
+                stage = "DAWN_FINISH"
+                reason = "Prasidėjo dinamiškai perskaičiuotas finalinis langas"
+            else:
+                stage = "DONE"
+                reason = "Sleep SOC sutampa su galutiniu targetu"
+
+        valid_until = (
+            (morning + timedelta(hours=1)).isoformat(timespec="seconds")
+            if morning is not None else None
+        )
+        current_load_kw = self.get_float("house_load", default=0.0) / 1000.0
+
+        self.night_plan = {
+            "stage": stage,
+            "target_soc": int(target),
+            "sleep_soc": int(round(sleep_soc)),
+            "soc": round(soc, 1),
+            "energy_remaining_kwh": round(energy_remaining, 2),
+            "generated_at": generated_at,
+            "valid_until": valid_until,
+            "trusted": bool(trusted),
+            "morning_on": morning.isoformat(timespec="seconds") if morning else None,
+            "dawn_start": dawn_start.isoformat(timespec="seconds") if dawn_start else None,
+            "reason": reason,
+            "plan_day": plan_day,
+            "pv_plan_kwh": round(pv_plan, 2),
+            "forecast_kwh": round(forecast, 2),
+            "expected_day_export_kwh": round(export_est, 2),
+            "room_needed_kwh": round(need, 2),
+            "current_load_kw": round(current_load_kw, 3),
+        }
+
+        self.set_state(
+            "sensor.energy_manager_night_plan",
+            state=stage,
+            attributes={
+                "friendly_name": "Dinaminis nakties planas",
+                "icon": "mdi:timeline-clock-outline",
+                **self.night_plan,
+            },
+        )
+
+        # Target sensorių atnaujiname iškart po kiekvieno naujo plano, kad
+        # automacijos nereikėtų laukti kito publish_status ciklo.
+        self.publish_status()
 
     # ============================================================
     #  INVERTERIO NAKTIES EKONOMIKA
