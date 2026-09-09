@@ -765,13 +765,24 @@ class EnergyManager(hass.Hass):
         return target, need, export_est, pv_plan, forecast, day
 
     def _night_morning_reference(self, now):
-        """Ryto PV pradžios orientyras. None reiškia nepatikimą planą."""
-        morning = self.get_morning_on_time()
-        if morning is None:
-            return None
-        # get_morning_on_time gali grąžinti laiką po kelių minučių, jei PV
-        # pradžia jau praėjo. Nakties planui tai reiškia, kad naktis baigiasi.
-        return morning
+        """Tikras ryto PV orientyras be slenkančio now+2 fallback.
+
+        Nakties planui būtinas fiksuotas deadline: praėjus jam būsena turi tapti
+        DAY, o ne kiekviename cikle nusikelti dar dviem minutėmis.
+        """
+        entity = (SENSOR["solcast_today_total"] if now.hour < 12
+                  else SENSOR["solcast_tomorrow"])
+        try:
+            detailed = self.get_state(entity, attribute="detailedForecast")
+            if not detailed:
+                return None
+            for period in detailed:
+                start = datetime.fromisoformat(period["period_start"])
+                if float(period.get("pv_estimate", 0)) >= MORNING_PV_THRESHOLD_KW:
+                    return start - timedelta(minutes=MORNING_ON_MARGIN_MIN)
+        except Exception as e:
+            self.log(f"Nakties plano ryto laiko klaida: {e}", level="WARNING")
+        return None
 
     def night_plan_cycle(self, kwargs):
         """Regeneruoja nakties planą kas 5 min.
@@ -939,8 +950,10 @@ class EnergyManager(hass.Hass):
                 return None
             for period in detailed:
                 start = datetime.fromisoformat(period["period_start"])
-                factor = self.hourly_factor(start.astimezone().hour)
-                if float(period.get("pv_estimate", 0)) * factor >= MORNING_PV_THRESHOLD_KW:
+                # Ryto startui naudojama ŽALIA Solcast galia. Valandinis
+                # korekcijos faktorius čia netaikomas: anksčiau jis debesuotą
+                # rytą galėjo nukelti įjungimą keliomis valandomis.
+                if float(period.get("pv_estimate", 0)) >= MORNING_PV_THRESHOLD_KW:
                     on_time = start - timedelta(minutes=MORNING_ON_MARGIN_MIN)
                     # Jei laikas jau praėjęs (pvz. skaičiuojama po aušros) —
                     # įjungti tuoj pat, kad time-trigger dar suveiktų.
