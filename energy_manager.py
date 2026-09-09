@@ -1043,6 +1043,10 @@ class EnergyManager(hass.Hass):
                     "icon": "mdi:weather-sunset-up",
                     "laikas": on_time.strftime("%H:%M"),
                     "pv_slenkstis_kw": MORNING_PV_THRESHOLD_KW,
+                    "calculation_method": "solcast_midpoint_linear_interpolation_v1",
+                    "calculation_resolution": "1_minute",
+                    "algorithm_version": "morning_100w_v2_20260909",
+                    "calculated_at": datetime.now().astimezone().isoformat(timespec="seconds"),
                 }
             )
 
