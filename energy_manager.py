@@ -35,6 +35,8 @@ from datetime import datetime, time, timedelta
 import json
 import os
 
+from solar_timing import forecast_threshold_time
+
 
 # ============================================================
 #  KONFIGŪRACIJA — pritaikyk prie savo sistemos
@@ -128,10 +130,8 @@ HOURLY_FACTOR_MAX = 1.6
 # Ryto įjungimas: PV galios slenkstis, nuo kurio gamyba dengia inverterio
 # savivartojimą ir laikyti jį įjungtą tampa pelninga (~100 W skirtumas
 # tarp idle 130 W ir off 30 W).
-MORNING_PV_THRESHOLD_KW = 0.1
-MORNING_ON_MARGIN_MIN   = 30      # įjungti tiek min anksčiau nei slenkstis
-                                  # (30, nes Solcast prognozė pusvalandinė —
-                                  # perkirtimas gali būti periodo pradžioje)
+MORNING_PV_THRESHOLD_KW = 0.1     # inverterį įjungti ties prognozuojamu >=100 W
+MORNING_ON_MARGIN_MIN   = 0       # nebenaudojamas: kirtimas interpoliuojamas minutėmis
 
 # Dinaminis nakties planas (2026-09-09)
 # Planas regeneruojamas kas 5 min pagal realų SOC ir naujausią PV prognozę.
@@ -765,21 +765,12 @@ class EnergyManager(hass.Hass):
         return target, need, export_est, pv_plan, forecast, day
 
     def _night_morning_reference(self, now):
-        """Tikras ryto PV orientyras be slenkančio now+2 fallback.
-
-        Nakties planui būtinas fiksuotas deadline: praėjus jam būsena turi tapti
-        DAY, o ne kiekviename cikle nusikelti dar dviem minutėmis.
-        """
+        """Minutės tikslumo 100 W PV deadline dinamiškam nakties planui."""
         entity = (SENSOR["solcast_today_total"] if now.hour < 12
                   else SENSOR["solcast_tomorrow"])
         try:
             detailed = self.get_state(entity, attribute="detailedForecast")
-            if not detailed:
-                return None
-            for period in detailed:
-                start = datetime.fromisoformat(period["period_start"])
-                if float(period.get("pv_estimate", 0)) >= MORNING_PV_THRESHOLD_KW:
-                    return start - timedelta(minutes=MORNING_ON_MARGIN_MIN)
+            return forecast_threshold_time(detailed, MORNING_PV_THRESHOLD_KW)
         except Exception as e:
             self.log(f"Nakties plano ryto laiko klaida: {e}", level="WARNING")
         return None
@@ -934,32 +925,20 @@ class EnergyManager(hass.Hass):
         return val if val >= 0 else default
 
     def get_morning_on_time(self):
-        """
-        Apskaičiuoja optimalų inverterio įjungimo laiką iš Solcast
-        pusvalandinės prognozės: pirmas intervalas, kai koreguota PV galia
-        viršija MORNING_PV_THRESHOLD_KW, minus MORNING_ON_MARGIN_MIN min.
-        Iki vidurdienio žiūri į šiandienos prognozę (aktualu prieš aušrą),
-        po — į rytojaus. Grąžina aware datetime arba None.
+        """Apskaičiuoja pirmą minutę, kai Solcast prognozuoja >=100 W PV.
+
+        Solcast detailedForecast yra pusvalandžio vidutinės galios taškai.
+        Kiekvieną tašką laikome intervalo vidurio reikšme, tarp gretimų taškų
+        atliekame linijinę interpolaciją ir kirtimo laiką apvaliname Į VIRŠŲ
+        iki pilnos minutės. Taip inverteris neįjungiamas anksčiau nei
+        prognozuojamas >=100 W momentas, bet neprarandama pusvalandžio energija.
         """
         now = datetime.now().astimezone()
         entity = (SENSOR["solcast_today_total"] if now.hour < 12
                   else SENSOR["solcast_tomorrow"])
         try:
             detailed = self.get_state(entity, attribute="detailedForecast")
-            if not detailed:
-                return None
-            for period in detailed:
-                start = datetime.fromisoformat(period["period_start"])
-                # Ryto startui naudojama ŽALIA Solcast galia. Valandinis
-                # korekcijos faktorius čia netaikomas: anksčiau jis debesuotą
-                # rytą galėjo nukelti įjungimą keliomis valandomis.
-                if float(period.get("pv_estimate", 0)) >= MORNING_PV_THRESHOLD_KW:
-                    on_time = start - timedelta(minutes=MORNING_ON_MARGIN_MIN)
-                    # Jei laikas jau praėjęs (pvz. skaičiuojama po aušros) —
-                    # įjungti tuoj pat, kad time-trigger dar suveiktų.
-                    if on_time <= now:
-                        on_time = now + timedelta(minutes=2)
-                    return on_time
+            return forecast_threshold_time(detailed, MORNING_PV_THRESHOLD_KW)
         except Exception as e:
             self.log(f"Ryto įjungimo laiko klaida: {e}", level="WARNING")
         return None
