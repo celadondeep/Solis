@@ -306,6 +306,9 @@ class EnergyManager(hass.Hass):
         boiler_state  = self.get_state(SENSOR["boiler_switch"])
         solcast_t     = self.corrected_remaining_today()
         solcast_tm    = self.corrected_tomorrow()
+        # Explicit heartbeat for the HA control core. It changes every publish
+        # cycle even when the calculated plan/decision itself is unchanged.
+        planner_heartbeat = datetime.now().astimezone().isoformat(timespec="seconds")
 
         # PASTABA: sensor.energy_manager_status priklauso template sensoriui
         # (configuration.yaml — rodo inverterio režimą). Sprendimo tekstas
@@ -323,6 +326,8 @@ class EnergyManager(hass.Hass):
                 "sezonas": season,
                 "soc_minimumas": f"{soc_min}%",
                 "inverterio_temperatura": f"{inverter_temp:.1f}°C",
+                "planner_heartbeat": planner_heartbeat,
+                "planner_interval_s": 300,
             }
         )
 
@@ -364,6 +369,8 @@ class EnergyManager(hass.Hass):
                 "unit_of_measurement": "%",
                 "icon": "mdi:battery-charging-80",
                 "device_class": "battery",
+                "planner_heartbeat": planner_heartbeat,
+                "planner_interval_s": 300,
             }
         )
 
