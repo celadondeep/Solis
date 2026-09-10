@@ -51,10 +51,12 @@ BATTERY_USABLE_KWH = 14.4
 SENSOR = {
     # Savaitiniai utility meter'iai (configuration.yaml → utility_meter:,
     # šaltiniai — Solis Modbus total skaitliukai; resetinasi pirmadienį 00:00)
-    "pv_week":         "sensor.energy_pv_week",
-    "grid_buy_week":   "sensor.energy_grid_buy_week",
-    "grid_sell_week":  "sensor.energy_grid_sell_week",
-    "house_week":      "sensor.energy_house_week",
+    # 2026-07-22: utility_meter'ių entity_id = vardo slug'as (jie turi name:),
+    # NE rakto. Taisyta iš energy_*_week į tikrus savaites_* vardus.
+    "pv_week":         "sensor.savaites_pv_generacija",
+    "grid_buy_week":   "sensor.savaites_pirkimas_is_tinklo",
+    "grid_sell_week":  "sensor.savaites_pardavimas_i_tinkla",
+    "house_week":      "sensor.savaites_namu_suvartojimas",
     # Boilerio dar nėra (ESP32 neprijungtas) — kol entity neegzistuoja, bus 0
     "boiler_week":     "sensor.energy_boiler_week",
     # Solcast savaitės prognozės sensoriaus nėra — tikslumo eilutė praleidžiama

@@ -1,24 +1,61 @@
+# Centrinis energijos branduolys. Namų ir Eimo adapteriai naudoja tuos
+# pačius energy_system modulius, bet atskirus profilius bei entity vardynus.
 energy_manager:
   module: energy_manager
   class: EnergyManager
 
-battery_health:
-  module: battery_health
-  class: BatteryHealth
+energy_manager_eimo:
+  module: energy_manager_eimo
+  class: EnergyManager
 
+# Nepriklausoma vartojimo prognozavimo periferija — bendras modelis,
+# atskiri išmokti duomenys ir abiejų objektų profiliai.
 consumption_model:
   module: consumption_model
   class: ConsumptionModel
+
+consumption_model_eimo:
+  module: consumption_model_eimo
+  class: ConsumptionModel
+
+# Kitos atskiros stebėsenos / ataskaitų periferijos.
+battery_health:
+  module: battery_health
+  class: BatteryHealth
 
 weekly_report:
   module: weekly_report
   class: WeeklyReport
 
-# ── 2-a elektrinė (Eimo SE) — atskira, nepriklausoma sistema (cloud Solis) ──
-energy_manager_eimo:
-  module: energy_manager_eimo
-  class: EnergyManager
 
-consumption_model_eimo:
-  module: consumption_model_eimo
-  class: ConsumptionModel
+# Šešėliniai branduoliai: tik planų palyginimas ir komandų peržiūra.
+# Šios aplikacijos neturi call_service ir niekada nerašo į inverterio aktuatorius.
+energy_shadow_home:
+  module: energy_shadow
+  class: ShadowManager
+
+energy_shadow_eimo:
+  module: energy_shadow_eimo
+  class: ShadowManager
+
+
+# Universali tinklo ir inverterio kokybės periferija. Abi instancijos naudoja
+# tą patį gryną skaičiavimo modulį, turi atskirus profilius ir nieko nevaldo.
+power_quality_home:
+  module: power_quality_manager
+  class: PowerQualityManager
+  site: home
+
+power_quality_eimo:
+  module: power_quality_manager
+  class: PowerQualityManager
+  site: eimo
+
+
+# Dashboardų šablono sinchronizatorius laikinai sustabdytas,
+# kad būtų galima rankiniu būdu palyginti ir pasirinkti seną išdėstymą.
+# Dabartiniai sugeneruoti failai išsaugoti:
+# /homeassistant/.codex-rollback/energy_core_phase4_20260906/dashboard_template_current
+# dashboard_template_sync:
+#   module: dashboard_sync
+#   class: DashboardTemplateSync
