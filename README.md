@@ -1,4 +1,4 @@
-# Solis AppDaemon — Eimo unified controls checkpoint
+# Solis AppDaemon — unified controls and predictive headroom
 
 This branch preserves the Python application source running in Home Assistant
 on 2026-09-12. The live checkout was based on `2597cbd9` and contained the new,
@@ -25,3 +25,19 @@ silence to request monitoring and 300/600/1200-second recovery pauses.
 The live Eimo executor was switched off at 09:03 LT on 2026-09-13 and back on
 at 09:31:52. The timing review did not issue either of those changes and
 preserves the latest live setting.
+
+## 2026-09-13 predictive headroom
+
+Model 4.3 adds 8 percentage points of planning headroom for **both** sites
+(77% preferred upper SOC when hardware max is 100%). It anticipates capacity
+pressure four hours ahead, budgets command setup time, protects P10 demand
+until the next recharge opportunity and holds an outstanding cutoff stable.
+Fresh measured PV has a bounded one-hour influence on the forecast.
+No BMS protection or grid charging settings are modified.
+
+Run `python -m unittest discover -s tests -p test_predictive_headroom.py`.
+The 14 tests cover early action, cloudy-day restraint, grid/export guards,
+night reserve, immutable outstanding targets, dawn budget and manual/storm
+overrides. See ha-config `docs/energy_headroom_dynamic_2026-09-13.md` for
+evidence, deployment hashes and rollback. Solis telemetry version 4.3.0
+has a separate bounded dynamic read schedule; its 59 tests live in ha-config.

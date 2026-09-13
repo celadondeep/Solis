@@ -1,0 +1,28 @@
+name: Predictive headroom validation
+
+on:
+  push:
+    branches: [main, codex/eimo-unified-20260912]
+    paths:
+      - "energy_system/**"
+      - "tests/test_predictive_headroom.py"
+      - ".github/workflows/headroom-validation.yml"
+  pull_request:
+    paths:
+      - "energy_system/**"
+      - "tests/test_predictive_headroom.py"
+      - ".github/workflows/headroom-validation.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile shared planner
+        run: python3 -m compileall -q energy_system
+      - name: Check forecast, reserve and command-target invariants
+        run: python3 -m unittest discover -s tests -p test_predictive_headroom.py -v

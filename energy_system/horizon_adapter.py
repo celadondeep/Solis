@@ -68,6 +68,9 @@ def build_horizon_mixin(profile):
             except Exception as exc:
                 result = dict(version=VERSION, valid=False, export_now=False,
                               night_active=False, inverter_on=True,
+                              solar_export_priority=False, soc_buffer_active=False,
+                              predictive_buffer_due=False, buffer_required_kwh=0,
+                              buffer_first_pressure_at=None, buffer_protected_soc=None,
                               reserve_soc=100, cutoff_soc=100, target_soc=profile["PLAN_TARGET_BAND_CEILING"],
                               wake_at=None, discharge_start_at=None, discharge_deadline=None,
                               required_preexport_kwh=0, required_headroom_kwh=0,
@@ -104,7 +107,8 @@ def build_horizon_mixin(profile):
                 if actual_export is not None else policy
             active_policy = preferred_policy(active_policy,
                 self.get_optional_sensor_float(buffer["min"]),
-                self.get_optional_sensor_float(buffer["max"]))
+                self.get_optional_sensor_float(buffer["max"]),
+                extra_headroom_soc=profile.get("EXTRA_HEADROOM_SOC", 0))
             connected = grid_present(now, self._read_state_record(buffer["heartbeat"]).get("state"),
                 [self.get_optional_sensor_float(e) for e in buffer["voltages"]],
                 self.get_optional_sensor_float(buffer["frequency"]), buffer["max_age"])
@@ -185,6 +189,17 @@ def build_horizon_mixin(profile):
                 slots = adjusted
             if acceptance is not None:
                 slots[0] = replace(slots[0], charge_limit_kw=acceptance)
+            # Cumulative daily bias reacts too slowly after a cloudy morning.
+            # Blend fresh measured PV for one hour only; retain the P10 downside.
+            pv_now = self.get_optional_float("pv_power")
+            if connected and pv_now is not None and pv_now >= 0:
+                adjusted = []
+                for s in slots:
+                    lead = (stamp(s.start)-stamp(now)).total_seconds()/3600
+                    weight = 0.5*max(0, 1-lead)
+                    pv = s.pv*(1-weight) + pv_now/1000*weight
+                    adjusted.append(replace(s, pv=pv, low_pv=min(s.low_pv, pv)))
+                slots = adjusted
             result = plan_horizon(slots, soc, active_policy)
             pv_now = self.get_optional_float("pv_power")
             production = (slots[0].pv >= profile["MORNING_PV_THRESHOLD_KW"] or
@@ -211,8 +226,11 @@ def build_horizon_mixin(profile):
                 result = daytime_buffer(result, slots, now, soc, active_policy,
                     connected=connected,
                     export_floor=self.get_optional_sensor_float(sensors["daytime_export_floor"]),
-                    already_buffering=(previous.get("soc_buffer_active") is True and
-                        self._read_state_record(profile["ACTUATOR"]["slot"]).get("state") == "on"),
+                    already_buffering=(previous.get("valid") is True and
+                        previous.get("soc_buffer_active") is True),
+                    previous_cutoff=previous.get("cutoff_soc"),
+                    execution_minutes=profile.get("HEADROOM_EXECUTION_MINUTES", 5),
+                    extra_headroom_soc=profile.get("EXTRA_HEADROOM_SOC", 0),
                     charge_acceptance_kw=acceptance)
                 if result["solar_export_priority"] and not result["export_now"]:
                     result["reason"] = "Dienos PV: namai → leistinas eksportas → baterija; vietos rezervas saugomas"

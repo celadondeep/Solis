@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import ceil, isfinite
 
-VERSION = "4.2-soc-buffer"
+VERSION = "4.3-predictive-headroom"
 
 
 def ha_attributes(value):
