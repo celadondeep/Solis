@@ -4,7 +4,7 @@ Sprendimai yra grynajame planner branduolyje. Prognozės, nakties
 planavimas ir boileris įjungiami kaip atskiros periferijos.
 """
 
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from math import isfinite
 from time import monotonic
 
@@ -673,6 +673,7 @@ def build_energy_manager(profile):
                 self.plan_revision += 1
                 self.last_plan_signature = signature
                 self.last_plan_committed_monotonic = monotonic()
+                self.plan_committed_at = datetime.now().astimezone().isoformat()
 
             # Sveikata publikuojama PRIEŠ atominį commit. Taip Executor,
             # gavęs plan state event po AppDaemon restarto, jau mato "ok"
@@ -765,40 +766,45 @@ def build_energy_manager(profile):
                     },
                 )
 
+            # Publish the current explanation and a finite source lease even
+            # when actuator values did not change. Revision changes only for a
+            # different physical target; this is not an inverter command.
+            self.set_state(
+                OUTPUT["plan"], state=plan.mode,
+                attributes={
+                    "friendly_name": f"{SITE_LABEL}: atominis energijos planas",
+                    "site": SITE_KEY,
+                    "revision": self.plan_revision,
+                    "target_soc": round(plan.target_soc, 1),
+                    "slot_active": (
+                        "unknown" if plan.slot_active is None
+                        else ("on" if plan.slot_active else "off")
+                    ),
+                    "slot_cutoff_soc": (
+                        "unknown" if plan.slot_cutoff_soc is None
+                        else round(plan.slot_cutoff_soc, 1)
+                    ),
+                    "inverter_on": (
+                        "unknown" if plan.inverter_on is None
+                        else ("on" if plan.inverter_on else "off")
+                    ),
+                    "inverter_control_available": (
+                        "on" if INVERTER_CONTROL_AVAILABLE else "off"
+                    ),
+                    "actionable": ("on" if plan.actionable else "off"),
+                    "inputs_valid": ("on" if plan.inputs_valid else "off"),
+                    "priority": plan.priority,
+                    "reason": plan.reason,
+                    "telemetry": dict(self.telemetry_status),
+                    "core_state": self.core_state,
+                    "coordinator": "Valdymo koordinatorius",
+                    "config_issues": list(self.config_issues),
+                    "committed_at": self.plan_committed_at,
+                    "evaluated_at": datetime.now().astimezone().isoformat(),
+                    "valid_until": (datetime.now().astimezone() + timedelta(seconds=180)).isoformat(),
+                },
+            )
             if signature_changed:
-                self.set_state(
-                    OUTPUT["plan"], state=plan.mode,
-                    attributes={
-                        "friendly_name": f"{SITE_LABEL}: atominis energijos planas",
-                        "site": SITE_KEY,
-                        "revision": self.plan_revision,
-                        "target_soc": round(plan.target_soc, 1),
-                        "slot_active": (
-                            "unknown" if plan.slot_active is None
-                            else ("on" if plan.slot_active else "off")
-                        ),
-                        "slot_cutoff_soc": (
-                            "unknown" if plan.slot_cutoff_soc is None
-                            else round(plan.slot_cutoff_soc, 1)
-                        ),
-                        "inverter_on": (
-                            "unknown" if plan.inverter_on is None
-                            else ("on" if plan.inverter_on else "off")
-                        ),
-                        "inverter_control_available": (
-                            "on" if INVERTER_CONTROL_AVAILABLE else "off"
-                        ),
-                        "actionable": ("on" if plan.actionable else "off"),
-                        "inputs_valid": ("on" if plan.inputs_valid else "off"),
-                        "priority": plan.priority,
-                        "reason": plan.reason,
-                        "telemetry": dict(self.telemetry_status),
-                        "core_state": self.core_state,
-                        "coordinator": "Valdymo koordinatorius",
-                        "config_issues": list(self.config_issues),
-                        "committed_at": datetime.now().astimezone().isoformat(),
-                    },
-                )
                 self.log(
                     f"[PLAN:{SITE_KEY}] rev={self.plan_revision} "
                     f"{plan.mode}: {plan.reason}"

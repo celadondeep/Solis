@@ -93,7 +93,7 @@ an outstanding target is held stable rather than chasing every SOC increase.
                   buffer_protected_soc=ceil(reserve), predictive_buffer_due=early)
     start = soc >= upper + 2
     keep = already_buffering and soc > upper + 0.5
-    if not (early or ((start or keep) and (near_surplus >= 0.3 or keep))):
+    if not (early or ((start or keep) and near_surplus >= 0.3)):
         return result
     safe_floor = max(reserve if early and soc <= upper+2 else upper,
                      finite(export_floor, policy.hard_floor))

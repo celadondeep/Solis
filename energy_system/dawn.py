@@ -86,7 +86,8 @@ def plan_dawn(slots, now, soc, policy, *, production_on=False,
               power_control=True, idle_kw=0.13, off_kw=0.03,
               pv_threshold_kw=0.1, wake_margin_minutes=30,
               execution_margin_minutes=5, min_sleep_minutes=20,
-              already_exporting=False, power_on=True, export_floor_soc=None):
+              already_exporting=False, power_on=True, export_floor_soc=None,
+              discharge_committed=False):
     """Recompute an explicit target/start/deadline from current SOC.
 
 When power control is available the inverter sleeps until the latest
@@ -137,7 +138,7 @@ The export ceiling is shared with PV and never added on top of PV export.
             ideal_start = stamp(s.start)+timedelta(hours=s.hours-duration)
     feasible = remaining <= 0.02
     # Explicit zero export limit must never activate TOU.
-    planned = forced >= (0.05 if already_exporting else policy.start_kwh) and policy.export_kw > 0
+    planned = forced >= (0.05 if already_exporting or discharge_committed else policy.start_kwh) and policy.export_kw > 0
     start = max(now_utc,ideal_start-timedelta(minutes=execution_margin_minutes)) if planned and ideal_start else None
     wake = max(now_utc,dawn-timedelta(minutes=wake_margin_minutes))
     if start:
@@ -145,7 +146,13 @@ The export ceiling is shared with PV and never added on top of PV export.
     # If waking for solar before a short discharge window, its household drain
     # creates some headroom too. Recompute at wake/SOC changes; the hardware
     # cutoff is the final dawn target, never a moving 0.75 kWh burst.
-    due = bool(start and start <= now_utc+timedelta(seconds=1) and soc > budget['target_soc']+0.5)
+    due = bool(planned and (discharge_committed or start and start <= now_utc+timedelta(seconds=1))
+               and soc > budget['target_soc']+0.5)
+    if due:
+        # Once the current night's discharge was committed, falling SOC must
+        # not move its calculated start into the future and put it back to sleep.
+        wake = now_utc
+        start = now_utc
     wait_seconds = (wake-now_utc).total_seconds()
     can_sleep = power_control and wait_seconds > 1 and (
         not power_on or wait_seconds >= min_sleep_minutes*60)

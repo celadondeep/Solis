@@ -110,6 +110,17 @@ class PredictiveHeadroomTests(unittest.TestCase):
         self.assertLessEqual(new['target_soc'], old['target_soc'])
         self.assertGreaterEqual(new['target_soc'], new['reserve_soc'])
 
+    def test_cloud_night_preparation_starts_25_minutes_earlier(self):
+        now=self.now.replace(hour=22)
+        slots=[Slot(now+timedelta(minutes=30*i),.5,
+                    3 if 19<=i<=40 else 0,2 if 19<=i<=40 else 0,.3) for i in range(52)]
+        local=plan_dawn(slots,now,47,self.policy,execution_margin_minutes=5)
+        cloud=plan_dawn(slots,now,47,self.policy,execution_margin_minutes=30)
+        a=datetime.fromisoformat(local['discharge_start_at'])
+        b=datetime.fromisoformat(cloud['discharge_start_at'])
+        self.assertEqual(a-b,timedelta(minutes=25))
+        self.assertEqual(local['cutoff_soc'],cloud['cutoff_soc'])
+
     def test_planner_preserves_manual_storm_and_hard_floor(self):
         guidance = self.evaluate()
         p = PlannerPolicy(hard_floor=13)

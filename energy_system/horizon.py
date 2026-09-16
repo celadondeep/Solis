@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import ceil, isfinite
 
-VERSION = "4.3-predictive-headroom"
+VERSION = "4.4-command-recovery"
 
 
 def ha_attributes(value):

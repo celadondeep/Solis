@@ -41,3 +41,17 @@ night reserve, immutable outstanding targets, dawn budget and manual/storm
 overrides. See ha-config `docs/energy_headroom_dynamic_2026-09-13.md` for
 evidence, deployment hashes and rollback. Solis telemetry version 4.3.0
 has a separate bounded dynamic read schedule; its 59 tests live in ha-config.
+
+## 2026-09-16 execution recovery
+
+Model 4.4 fixes night discharge continuation, grid-loss sleep protection,
+stale plan explanations and leases, lingering daytime buffer requests and
+sleeping-inverter execution diagnostics. The Eimo night setup allowance is
+30 minutes (Namai 5 minutes), including the follow-up deployed September 13.
+The planning headroom remains 8 additional SOC points.
+
+Run `python -m unittest discover -s tests`: 20 planner regression tests.
+The companion Solis integration 4.4.0 has 73 independent queue/API tests in
+ha-config. See `docs/eimo_command_recovery_2026-09-16.md` in ha-config for
+failure handling, deployment and actual live verification.
+

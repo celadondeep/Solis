@@ -204,6 +204,11 @@ def build_horizon_mixin(profile):
             pv_now = self.get_optional_float("pv_power")
             production = (slots[0].pv >= profile["MORNING_PV_THRESHOLD_KW"] or
                 (pv_now is not None and pv_now/1000 >= profile["MORNING_PV_THRESHOLD_KW"]))
+            previous = getattr(self, "_horizon_result", {})
+            deadline = previous.get("discharge_deadline")
+            committed = (previous.get("valid") is True and previous.get("night_active") is True
+                         and previous.get("export_now") is True and deadline is not None
+                         and stamp(now) < stamp(deadline))
             night = plan_dawn(slots,now,soc,active_policy,production_on=production,
                 power_control=profile["INVERTER_CONTROL_AVAILABLE"],
                 power_on=self._read_state_record(sensors["power_state"]).get("state") != "off",
@@ -212,9 +217,13 @@ def build_horizon_mixin(profile):
                 idle_kw=profile["INVERTER_IDLE_W"]/1000,
                 off_kw=profile["INVERTER_OFF_W"]/1000,
                 pv_threshold_kw=profile["MORNING_PV_THRESHOLD_KW"],
-                wake_margin_minutes=profile["MORNING_ON_MARGIN_MIN"])
+                wake_margin_minutes=profile["MORNING_ON_MARGIN_MIN"],
+                execution_margin_minutes=profile.get("HEADROOM_EXECUTION_MINUTES", 5),
+                discharge_committed=committed)
             result.update(night_active=False,inverter_on=True,dawn=night,
-                          solar_export_priority=False,
+                          solar_export_priority=False, soc_buffer_active=False,
+                          predictive_buffer_due=False, buffer_required_kwh=0,
+                          buffer_first_pressure_at=None, buffer_protected_soc=None,
                           wake_at=None,discharge_start_at=None,discharge_deadline=None,
                           required_headroom_kwh=0,standby_saved_kwh=0)
             if night:
@@ -239,7 +248,8 @@ def build_horizon_mixin(profile):
                           grid_connected=connected, charge_acceptance_kw=acceptance)
             if not connected:
                 result.update(export_now=False, solar_export_priority=False,
-                              reason="Tinklo buvimas nepatvirtintas; priverstinis eksportas išjungtas")
+                              soc_buffer_active=False, inverter_on=True,
+                              reason="Tinklo buvimas nepatvirtintas; eksportas ir nakties išjungimas uždrausti")
             result.update(model_export_limit_kw=active_policy.export_kw,
                           model_charge_kw=active_policy.charge_kw,
                           model_discharge_kw=active_policy.discharge_kw,

@@ -66,6 +66,11 @@ def evaluate_execution(
         mismatches.append("executor_off")
 
     expected_mode = desired["mode"]
+    # The queue stops all slots then powers down without an unnecessary mode
+    # write. A sleeping inverter's remembered mode is not a failed execution.
+    if desired["power"] == "off" and observed.get("power") == "off":
+        expected_mode = None
+        desired["mode"] = None
     actual_mode = observed.get("mode")
     if expected_mode is not None and not _same_mode(actual_mode, expected_mode, actuator):
         mismatches.append(
@@ -156,7 +161,7 @@ def build_supervisor_mixin(profile):
             if command_entity:
                 if command_status in {"sending", "settling", "cooldown", "ready"} and state == "degraded":
                     state = "applying"
-                elif command_status in {"not_confirmed", "awaiting_confirmation", "waiting_for_cloud", "cloud_backoff", "storage_error", "unsupported_profile", "unknown", "unavailable", None} and state != "paused":
+                elif command_status in {"not_confirmed", "awaiting_confirmation", "waiting_for_cloud", "cloud_backoff", "storage_error", "unsupported_profile", "retry_wait", "conflicting_targets", "unknown", "unavailable", None} and state != "paused":
                     state = "degraded"
             elif state == "degraded" and age < settle_seconds:
                 state = "applying"

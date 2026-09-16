@@ -124,6 +124,12 @@ def decide_plan(inputs: PlannerInput, policy: PlannerPolicy) -> EnergyPlan:
         else 0.0
     )
 
+    if inputs.horizon is not None and inputs.horizon.get("grid_connected") is False:
+        return EnergyPlan(mode="self_use", target_soc=target, slot_active=False,
+            slot_cutoff_soc=None, inverter_on=True,
+            reason="Tinklo buvimas nepatvirtintas; eksportas ir nakties išjungimas uždrausti",
+            priority="grid_guard")
+
     if soc <= policy.hard_floor:
         inverter_on = inputs.in_production_hours
         return EnergyPlan(
