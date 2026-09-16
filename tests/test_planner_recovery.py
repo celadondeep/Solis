@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from energy_system.planner import PlannerInput, PlannerPolicy, decide_plan, EnergyPlan
-from energy_system.supervisor import evaluate_execution
+from energy_system.supervisor import evaluate_execution, build_supervisor_mixin
 from energy_system.dawn import plan_dawn
 from energy_system.horizon import HorizonPolicy, Slot
 from energy_system.soc_buffer import daytime_buffer
@@ -14,6 +14,23 @@ from dataclasses import replace
 
 
 class NightRegressionTests(unittest.TestCase):
+    def test_hidden_slot_cleanup_remains_applying_until_confirmation(self):
+        profile={'ACTUATOR':{'mode':'mode','slot':'slot','slot_cutoff':'cutoff','power':'power',
+                            'mode_by_plan':{'self_use':'Self-Use'}},
+                 'OUTPUT':{'executor_health':'health'},'KEY':'eimo','SITE_LABEL':'Eimo',
+                 'EXECUTOR_ENTITY':'executor','EXECUTOR_SETTLE_SECONDS':420,
+                 'INVERTER_CONTROL_AVAILABLE':True,'FORECAST_SOURCE_LABEL':'test',
+                 'COMMAND_STATUS_ENTITY':'queue'}
+        obj=build_supervisor_mixin(profile)()
+        obj.current_plan=EnergyPlan('self_use',20,False,None,True,'day')
+        obj.last_plan_committed_monotonic=0
+        actual={'mode':'Self-Use','slot':'off','cutoff':20,'power':'on','executor':'on','queue':'settling'}
+        obj.get_state=lambda entity:actual[entity]
+        result={};obj.set_state=lambda entity,**kw:result.update(kw)
+        obj.publish_executor_health()
+        self.assertEqual(result['state'],'applying')
+        self.assertEqual(result['attributes']['mismatches'],[])
+
     def test_unchanged_targets_publish_current_reason_and_new_lease_without_new_revision(self):
         import energy_system
         path=Path(energy_system.__file__).parent/'manager.py'

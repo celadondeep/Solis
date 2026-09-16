@@ -159,7 +159,11 @@ def build_supervisor_mixin(profile):
             command_status = self.get_state(command_entity) if command_entity else None
             observed["command_status"] = command_status
             if command_entity:
-                if command_status in {"sending", "settling", "cooldown", "ready"} and state == "degraded":
+                if command_status in {"sending", "settling"} and state != "paused":
+                    # Hidden-slot cleanup also needs confirmation even when
+                    # all visible entities already match the atomic plan.
+                    state = "applying"
+                elif command_status in {"cooldown", "ready"} and state == "degraded":
                     state = "applying"
                 elif command_status in {"not_confirmed", "awaiting_confirmation", "waiting_for_cloud", "cloud_backoff", "storage_error", "unsupported_profile", "retry_wait", "conflicting_targets", "unknown", "unavailable", None} and state != "paused":
                     state = "degraded"

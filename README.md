@@ -50,8 +50,7 @@ sleeping-inverter execution diagnostics. The Eimo night setup allowance is
 30 minutes (Namai 5 minutes), including the follow-up deployed September 13.
 The planning headroom remains 8 additional SOC points.
 
-Run `python -m unittest discover -s tests`: 20 planner regression tests.
+Run `python -m unittest discover -s tests`: 21 planner regression tests.
 The companion Solis integration 4.4.0 has 73 independent queue/API tests in
 ha-config. See `docs/eimo_command_recovery_2026-09-16.md` in ha-config for
 failure handling, deployment and actual live verification.
-
