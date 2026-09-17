@@ -168,7 +168,7 @@ class PowerQualityManager(hass.Hass):
             )
             self.history = self.history[-maximum:]
             self.samples_since_save += 1
-            save_every = 60 if self.site == "home" else 12
+            save_every = int(self.profile.get("save_every_samples", 60))
             if self.samples_since_save >= save_every:
                 self._save_history()
 

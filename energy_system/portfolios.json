@@ -1,0 +1,58 @@
+{
+  "combined": {
+    "title": "Bendras elektrinių portfelis",
+    "start": "2026-02-01",
+    "end": "2030-02-01",
+    "monthly_weights": [
+      0.02,
+      0.04,
+      0.08,
+      0.12,
+      0.14,
+      0.14,
+      0.14,
+      0.12,
+      0.09,
+      0.06,
+      0.03,
+      0.02
+    ],
+    "members": [
+      {
+        "site": "eimo",
+        "start": "2026-02-01",
+        "production_share": 0.46,
+        "fee_share": 0.5,
+        "entity": "sensor.solis_inverter_1033300254190112_solis_energy_total",
+        "label": "Eimo"
+      },
+      {
+        "site": "home",
+        "start": "2026-05-09",
+        "production_share": 0.54,
+        "fee_share": 0.5,
+        "entity": "sensor.solis_s6_eh3p_pv_total_energy_generation",
+        "label": "Namai"
+      }
+    ],
+    "entities": {
+      "savings": "sensor.pv_sutaupyta_viso",
+      "net": "sensor.pv_gryna_investicija",
+      "percent": "sensor.pv_atsipirkes_procentais",
+      "remaining": "sensor.pv_liko_iki_atsipirkimo",
+      "date": "sensor.pv_atsipirkimo_prognoze",
+      "production": "sensor.pv_pagaminta_viso",
+      "investment": "input_number.pv_investicija",
+      "grant": "input_number.pv_parama",
+      "price": "input_number.pv_kwh_verte",
+      "fee": "input_number.pv_men_mokestis",
+      "annual": "input_number.pv_metine_gamyba"
+    },
+    "defaults": {
+      "annual": 11000,
+      "price": 0.25,
+      "ratio": 0.85,
+      "fee": 10
+    }
+  }
+}

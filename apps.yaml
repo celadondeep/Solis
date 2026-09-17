@@ -1,61 +1,35 @@
-# Centrinis energijos branduolys. Namų ir Eimo adapteriai naudoja tuos
-# pačius energy_system modulius, bet atskirus profilius bei entity vardynus.
+# Shared classes, independent configuration and state for every plant.
 energy_manager:
-  module: energy_manager
-  class: EnergyManager
-
+  module: plant_apps
+  class: EnergyManager_home
 energy_manager_eimo:
-  module: energy_manager_eimo
-  class: EnergyManager
-
-# Nepriklausoma vartojimo prognozavimo periferija — bendras modelis,
-# atskiri išmokti duomenys ir abiejų objektų profiliai.
+  module: plant_apps
+  class: EnergyManager_eimo
 consumption_model:
-  module: consumption_model
-  class: ConsumptionModel
-
+  module: plant_apps
+  class: ConsumptionModel_home
 consumption_model_eimo:
-  module: consumption_model_eimo
-  class: ConsumptionModel
-
-# Kitos atskiros stebėsenos / ataskaitų periferijos.
+  module: plant_apps
+  class: ConsumptionModel_eimo
 battery_health:
   module: battery_health
   class: BatteryHealth
-
+  site: home
 weekly_report:
   module: weekly_report
   class: WeeklyReport
-
-
-# Šešėliniai branduoliai: tik planų palyginimas ir komandų peržiūra.
-# Šios aplikacijos neturi call_service ir niekada nerašo į inverterio aktuatorius.
+  site: home
 energy_shadow_home:
-  module: energy_shadow
-  class: ShadowManager
-
+  module: plant_apps
+  class: ShadowManager_home
 energy_shadow_eimo:
-  module: energy_shadow_eimo
-  class: ShadowManager
-
-
-# Universali tinklo ir inverterio kokybės periferija. Abi instancijos naudoja
-# tą patį gryną skaičiavimo modulį, turi atskirus profilius ir nieko nevaldo.
+  module: plant_apps
+  class: ShadowManager_eimo
 power_quality_home:
   module: power_quality_manager
   class: PowerQualityManager
   site: home
-
 power_quality_eimo:
   module: power_quality_manager
   class: PowerQualityManager
   site: eimo
-
-
-# Dashboardų šablono sinchronizatorius laikinai sustabdytas,
-# kad būtų galima rankiniu būdu palyginti ir pasirinkti seną išdėstymą.
-# Dabartiniai sugeneruoti failai išsaugoti:
-# /homeassistant/.codex-rollback/energy_core_phase4_20260906/dashboard_template_current
-# dashboard_template_sync:
-#   module: dashboard_sync
-#   class: DashboardTemplateSync

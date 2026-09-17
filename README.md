@@ -54,3 +54,30 @@ Run `python -m unittest discover -s tests`: 21 planner regression tests.
 The companion Solis integration 4.4.0 has 73 independent queue/API tests in
 ha-config. See `docs/eimo_command_recovery_2026-09-16.md` in ha-config for
 failure handling, deployment and actual live verification.
+
+## 2026-09-17 reusable plant architecture and rolling consumption
+
+Model 4.5 moves plant data into `energy_system/sites/*.json`, with shared
+`site_defaults.json` and optional `portfolios.json`. `plant_apps.py` builds
+the same manager, consumption and shadow classes for every registered plant.
+The planner is shared; HA executes it with a Modbus or SolisCloud blueprint
+from ha-config. Both adapters enforce the same renewable plan lease.
+
+Both live dashboards use the same four views and actual power feedback.
+There are no inverter serial numbers or site-specific entity maps in the
+shared dashboard code. Physical capabilities, limits, state files, outputs,
+finance membership and transport bindings belong to the site profile.
+Legacy per-site wrapper files remain for compatibility, but apps.yaml does
+not use them. Existing auxiliary home automations remain separately managed.
+
+Consumption uses the last 30 completed local calendar days. Daily and weekday
+graphs display observed means after isolated outliers are excluded. Hourly
+means come from complete days of HA recorder hourly changes, with DST-aware
+coverage checks. Forecasts apply a conservative weekday correction. A daily
+00:20 refresh and at most one delayed retry use HA history, not SolisCloud.
+An unavailable history query preserves the last usable forecast shape and
+publishes data-quality status. Learned files are written atomically.
+
+Run `python -m unittest discover -s tests`: 52 tests cover planning,
+site isolation, profile reuse, rolling windows, DST and recorder recovery.
+See [architecture and adding a plant](docs/plant_architecture.md).

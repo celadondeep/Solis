@@ -14,260 +14,12 @@ from pathlib import Path
 from typing import Any, Dict, Iterable
 
 
-BASE = Path("/homeassistant")
+from energy_system.site_registry import APPS_DIR, dashboard_profiles
+
+BASE = APPS_DIR.parent.parent
 LIVE_DIR = BASE / "lovelace"
 PREVIEW_DIR = BASE / ".codex-preview" / "energy_dashboards"
-
-
-PLANTS: Dict[str, Dict[str, Any]] = {
-    "home": {
-        "title": "Namai SE",
-        "file": "energijos_valdymas.yaml",
-        "site_label": "Namai",
-        "soc": "sensor.solis_s6_eh3p_battery_soc",
-        "pv": "sensor.solis_s6_eh3p_total_pv_power",
-        "load": "sensor.solis_s6_eh3p_household_load_power",
-        "grid": "sensor.solis_s6_eh3p_grid_power_net",
-        "battery": "sensor.solis_s6_eh3p_battery_power_net",
-        "plan": "sensor.solis_plan",
-        "plan_mode": "sensor.solis_plan_mode",
-        "target": "sensor.solis_plan_target_soc",
-        "core": "sensor.solis_core_state",
-        "telemetry": "sensor.solis_telemetry_health",
-        "coordinator": "sensor.solis_control_coordinator",
-        "planner": "sensor.solis_planner_health",
-        "executor": "sensor.solis_executor_health",
-        "shadow": "sensor.solis_shadow_check",
-        "shadow_plan": "sensor.solis_shadow_plan",
-        "shadow_cmd": "sensor.solis_shadow_commands",
-        "decision": "sensor.energy_manager_decision",
-        "balance": "sensor.energy_manager_balance",
-        "surplus": "sensor.energy_manager_surplus_now",
-        "room": "sensor.energy_manager_room_shortfall",
-        "cons_remaining": "sensor.consumption_remaining_today",
-        "cons_tomorrow": "sensor.consumption_forecast_tomorrow",
-        "correction": "sensor.solcast_correction_factor",
-        "boiler": "sensor.energy_manager_boiler_status",
-        "storm": "input_boolean.storm_mode",
-        "manual": "input_boolean.manual_tou_override",
-        "manual_soc": "input_boolean.manual_soc_override",
-        "toggles": {
-            "forecast": "input_boolean.namai_dashboard_prognoze",
-            "diagnostics": "input_boolean.namai_dashboard_diagnostika",
-            "control": "input_boolean.namai_dashboard_valdymas",
-            "graphs": "input_boolean.namai_dashboard_grafikai",
-            "boiler": "input_boolean.namai_dashboard_boileris",
-        },
-        "analysis": {
-            "today": {
-                "savings": "sensor.energy_savings_today",
-                "consumption": "sensor.solis_s6_eh3p_today_energy_consumption",
-                "import": "sensor.solis_s6_eh3p_today_energy_imported_from_grid",
-                "export": "sensor.solis_s6_eh3p_today_energy_fed_into_grid",
-            },
-            "consumption_model": {
-                "daily_avg": "sensor.consumption_daily_avg",
-                "remaining": "sensor.consumption_remaining_today",
-                "tomorrow": "sensor.consumption_forecast_tomorrow",
-            },
-            "phases": {
-                "voltage": [
-                    "sensor.solis_s6_eh3p_meter_ac_voltage_a",
-                    "sensor.solis_s6_eh3p_meter_ac_voltage_b",
-                    "sensor.solis_s6_eh3p_meter_ac_voltage_c",
-                ],
-                "grid": [
-                    "sensor.solis_s6_eh3p_meter_active_power_a",
-                    "sensor.solis_s6_eh3p_meter_active_power_b",
-                    "sensor.solis_s6_eh3p_meter_active_power_c",
-                ],
-                "inverter": [
-                    "sensor.inverter_phase_power_l1",
-                    "sensor.inverter_phase_power_l2",
-                    "sensor.inverter_phase_power_l3",
-                ],
-            },
-            "battery_health": {
-                "soh": "sensor.solis_s6_eh3p_battery_soh",
-                "cycles": "sensor.battery_equivalent_cycles",
-                "charged_today": "sensor.solis_s6_eh3p_today_battery_charge_energy",
-                "discharged_today": "sensor.solis_s6_eh3p_today_battery_discharge_energy",
-            },
-            "inverter": {
-                "temperature": "sensor.solis_s6_eh3p_temperature",
-                "status": "sensor.solis_s6_eh3p_status_string",
-                "frequency": "sensor.solis_s6_eh3p_grid_frequency",
-            },
-            "efficiency": [
-                ("sensor.system_efficiency", "Sistema"),
-                ("sensor.battery_roundtrip_efficiency", "Baterija"),
-                ("sensor.battery_losses_total", "Bat. nuostoliai"),
-                ("sensor.inverter_losses_total", "Inv. nuostoliai"),
-                ("sensor.battery_equivalent_cycles", "Bat. ciklai"),
-            ],
-            "cable": {
-                "title": "Kabelio nuostoliai (50 m, 5×6 mm²)",
-                "entities": [
-                    ("sensor.cable_loss_power", "Dabar"),
-                    ("sensor.cable_loss_percent", "Nuo srauto"),
-                    ("sensor.kabelio_nuostoliai_siandien", "Šiandien"),
-                    ("sensor.cable_loss_energy", "Iš viso"),
-                ],
-            },
-            "daily_balance": [
-                ("sensor.solis_s6_eh3p_pv_today_energy_generation", "Saulė", "#fbc02d"),
-                ("sensor.solis_s6_eh3p_today_energy_consumption", "Suvartota", "#f44336"),
-                ("sensor.solis_s6_eh3p_today_energy_fed_into_grid", "Parduota", "#4caf50"),
-                ("sensor.solis_s6_eh3p_today_energy_imported_from_grid", "Pirkta", "#9e9e9e"),
-            ],
-            "temperature": "sensor.solis_s6_eh3p_temperature",
-            "battery_efficiency": "sensor.battery_roundtrip_efficiency",
-            "forecast_accuracy": "sensor.solcast_forecast_yesterday_accuracy",
-            "quality": {
-                "state": "sensor.solis_power_quality_state",
-                "voltage_min": "sensor.solis_power_quality_voltage_min",
-                "voltage_max": "sensor.solis_power_quality_voltage_max",
-                "spread": "sensor.solis_power_quality_voltage_spread",
-                "active": "sensor.solis_power_quality_active_power",
-                "reactive": "sensor.solis_power_quality_reactive_power",
-                "pf": "sensor.solis_power_quality_power_factor",
-                "frequency": "sensor.solis_power_quality_frequency",
-                "rise": "sensor.solis_power_quality_voltage_rise",
-                "active_imbalance": "sensor.solis_power_quality_active_imbalance",
-                "current_imbalance": "sensor.solis_power_quality_current_imbalance",
-            },
-        },
-        "consumption_profile": "sensor.consumption_profile",
-        "eso_import": "eso:energy_consumed_220588",
-        "eso_export": "eso:energy_returned_220588",
-    },
-    "eimo": {
-        "title": "Eimo SE",
-        "file": "eimo.yaml",
-        "site_label": "Eimo",
-        "soc": "sensor.solis_inverter_1033300254190112_solis_remaining_battery_capacity",
-        "pv": "sensor.eimo_pv_power",
-        "load": "sensor.solis_inverter_1033300254190112_solis_total_consumption_power",
-        "grid": "sensor.solis_inverter_1033300254190112_solis_power_grid_total_power",
-        "battery": "sensor.solis_inverter_1033300254190112_solis_battery_power",
-        "plan": "sensor.eimo_plan",
-        "plan_mode": "sensor.eimo_plan_mode",
-        "target": "sensor.eimo_plan_target_soc",
-        "core": "sensor.eimo_core_state",
-        "telemetry": "sensor.eimo_telemetry_health",
-        "coordinator": "sensor.eimo_control_coordinator",
-        "planner": "sensor.eimo_planner_health",
-        "executor": "sensor.eimo_executor_health",
-        "shadow": "sensor.eimo_shadow_check",
-        "shadow_plan": "sensor.eimo_shadow_plan",
-        "shadow_cmd": "sensor.eimo_shadow_commands",
-        "decision": "sensor.energy_manager_eimo_decision",
-        "balance": "sensor.energy_manager_eimo_balance",
-        "surplus": "sensor.energy_manager_eimo_surplus_now",
-        "room": "sensor.energy_manager_eimo_room_shortfall",
-        "cons_remaining": "sensor.consumption_remaining_today_eimo",
-        "cons_tomorrow": "sensor.consumption_forecast_tomorrow_eimo",
-        "correction": "sensor.solcast_correction_factor_eimo",
-        "boiler": "sensor.energy_manager_eimo_boiler_status",
-        "storm": "input_boolean.storm_mode_eimo",
-        "manual": None,
-        "manual_soc": None,
-        "toggles": {
-            "forecast": "input_boolean.eimo_dashboard_prognoze",
-            "diagnostics": "input_boolean.eimo_dashboard_diagnostika",
-            "control": "input_boolean.eimo_dashboard_valdymas",
-            "graphs": "input_boolean.eimo_dashboard_grafikai",
-            "boiler": "input_boolean.eimo_dashboard_boileris",
-        },
-        "analysis": {
-            "today": {
-                "savings": "sensor.energy_savings_today_eimo",
-                "consumption": "sensor.solis_inverter_1033300254190112_solis_daily_grid_energy_used",
-                "import": "sensor.solis_inverter_1033300254190112_solis_daily_grid_energy_purchased",
-                "export": "sensor.solis_inverter_1033300254190112_solis_daily_on_grid_energy",
-            },
-            "consumption_model": {
-                "daily_avg": "sensor.consumption_daily_avg_eimo",
-                "remaining": "sensor.consumption_remaining_today_eimo",
-                "tomorrow": "sensor.consumption_forecast_tomorrow_eimo",
-            },
-            "phases": {
-                "voltage": [
-                    "sensor.solis_inverter_1033300254190112_solis_meter_item_a_volt",
-                    "sensor.solis_inverter_1033300254190112_solis_meter_item_b_volt",
-                    "sensor.solis_inverter_1033300254190112_solis_meter_item_c_volt",
-                ],
-                "grid": [
-                    "sensor.solis_inverter_1033300254190112_solis_grid_phase1_power",
-                    "sensor.solis_inverter_1033300254190112_solis_grid_phase2_power",
-                    "sensor.solis_inverter_1033300254190112_solis_grid_phase3_power",
-                ],
-                # Cloud integracija neturi patikimų atskirų inverterio fazių galių.
-                "inverter": [],
-            },
-            "battery_health": {
-                "soh": "sensor.solis_inverter_1033300254190112_solis_battery_state_of_health",
-                "cycles": "sensor.battery_equivalent_cycles_eimo",
-                "charged_today": "sensor.solis_inverter_1033300254190112_solis_daily_energy_charged",
-                "discharged_today": "sensor.solis_inverter_1033300254190112_solis_daily_energy_discharged",
-            },
-            "inverter": {
-                "temperature": "sensor.solis_inverter_1033300254190112_solis_temperature",
-                "status": "sensor.solis_inverter_1033300254190112_solis_state",
-                "frequency": "sensor.solis_inverter_1033300254190112_solis_ac_frequency",
-            },
-            # Tik metrikos, kurias Eimo cloud šaltinis leidžia apskaičiuoti patikimai.
-            "efficiency": [
-                ("sensor.battery_roundtrip_efficiency_eimo", "Baterija"),
-                ("sensor.battery_equivalent_cycles_eimo", "Bat. ciklai"),
-            ],
-            "cable": None,
-            "cable_note": (
-                "Eimo kabelio nuostolių modelis neįjungtas: profilyje dar nėra "
-                "patvirtinto kabelio ilgio, skerspjūvio ir vietinių fazių srovių."
-            ),
-            "daily_balance": [
-                ("sensor.solis_inverter_1033300254190112_solis_energy_today", "Saulė", "#fbc02d"),
-                ("sensor.solis_inverter_1033300254190112_solis_daily_grid_energy_used", "Suvartota", "#f44336"),
-                ("sensor.solis_inverter_1033300254190112_solis_daily_on_grid_energy", "Parduota", "#4caf50"),
-                ("sensor.solis_inverter_1033300254190112_solis_daily_grid_energy_purchased", "Pirkta", "#9e9e9e"),
-            ],
-            "temperature": "sensor.solis_inverter_1033300254190112_solis_temperature",
-            "battery_efficiency": "sensor.battery_roundtrip_efficiency_eimo",
-            "forecast_accuracy": None,
-            "forecast_note": (
-                "Eimo 30 d. prognozės tikslumo grafikas bus įjungtas, kai bus "
-                "sukauptas atskiras vakarykštės Eimo gamybos faktas."
-            ),
-            "quality": {
-                "state": "sensor.eimo_power_quality_state",
-                "voltage_min": "sensor.eimo_power_quality_voltage_min",
-                "voltage_max": "sensor.eimo_power_quality_voltage_max",
-                "spread": "sensor.eimo_power_quality_voltage_spread",
-                "active": "sensor.eimo_power_quality_active_power",
-                "reactive": "sensor.eimo_power_quality_reactive_power",
-                "pf": "sensor.eimo_power_quality_power_factor",
-                "frequency": "sensor.eimo_power_quality_frequency",
-                "rise": "sensor.eimo_power_quality_voltage_rise",
-                "active_imbalance": "sensor.eimo_power_quality_active_imbalance",
-                "current_imbalance": "sensor.eimo_power_quality_current_imbalance",
-            },
-        },
-        "consumption_profile": "sensor.consumption_profile_eimo",
-        "eso_import": "eso:energy_consumed_266493",
-        "eso_export": "eso:energy_returned_266493",
-    },
-}
-
-
-FORECAST_ENTITIES = [
-    "sensor.solcast_pv_forecast_forecast_remaining_today",
-    "sensor.solcast_pv_forecast_forecast_today",
-    "sensor.solcast_pv_forecast_forecast_tomorrow",
-    "sensor.solcast_pv_forecast_peak_forecast_today",
-    "sensor.solcast_pv_forecast_power_now",
-    "sensor.solcast_pv_forecast_power_in_1_hour",
-]
+PLANTS = dashboard_profiles()
 
 
 HOURLY_PROFILE_JS = """const arr = entity.attributes.hourly_kwh || [];
@@ -292,7 +44,7 @@ return (entity.attributes.weekday_kwh || []).map((v, i) => {
 
 
 WEEKDAY_AVG_JS = """const arr = entity.attributes.weekday_kwh || [];
-const avg = arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+const avg = entity.attributes.daily_avg ?? null;
 const now = new Date();
 const dow = (now.getDay() + 6) % 7;
 const monday = new Date(now); monday.setDate(now.getDate() - dow - 7); monday.setHours(0, 0, 0, 0);
@@ -302,65 +54,30 @@ return arr.map((v, i) => {
 });"""
 
 
-PAYBACK_SAVINGS_JS = """const W = [0.02, 0.04, 0.08, 0.12, 0.14, 0.14, 0.14, 0.12, 0.09, 0.06, 0.03, 0.02];
-const a = entity.attributes;
-const annual = Number(a.metine_gamyba) || 11000;
-const price = Number(a.kwh_verte) || 0.25;
-const ratio = Number(a.naudingumo_koef) || 0.85;
-const fee = Number(a.men_mokestis) || 10;
-const eimoStart = new Date(2026, 1, 1);
-const modbusStart = new Date(2026, 4, 9);
-const eimoShare = 0.46;
-const pts = [];
-let cum = 0;
-let d = new Date(2026, 1, 1);
-const endD = new Date(2030, 1, 1);
-while (d <= endD) {
-  pts.push([d.getTime(), cum]);
-  const share = d < modbusStart ? eimoShare : 1;
-  const mFee = (d >= eimoStart ? fee / 2 : 0) + (d >= modbusStart ? fee / 2 : 0);
-  cum += annual * W[d.getMonth()] * share * price * ratio - mFee;
-  d = new Date(d.getFullYear(), d.getMonth() + 1, 1);
+def payback_generator(finance, savings=False):
+    """Same model for any portfolio membership; all dates and shares are data."""
+    return "const cfg = " + json.dumps(finance, ensure_ascii=False) + ";\n" + r"""
+const day = value => { const [y,m,d]=value.split('-').map(Number); return new Date(y,m-1,d); };
+const numeric = (value,fallback) => value!==null && value!==undefined && String(value).trim()!=='' && Number.isFinite(Number(value)) ? Number(value) : fallback;
+const a=entity.attributes, W=cfg.monthly_weights, defaults=cfg.defaults;
+const annual=numeric(a.metine_gamyba,defaults.annual), price=numeric(a.kwh_verte,defaults.price);
+const ratio=numeric(a.naudingumo_koef,defaults.ratio), fee=numeric(a.men_mokestis,defaults.fee);
+let d=day(cfg.start), cum=0; const end=day(cfg.end), pts=[];
+while(d<=end) {
+  pts.push([d.getTime(),cum]);
+  const active=cfg.members.filter(m=>d>=day(m.start));
+  const share=active.reduce((sum,m)=>sum+m.production_share,0);
+  const fees=active.reduce((sum,m)=>sum+m.fee_share,0);
+  cum += annual*W[d.getMonth()]*share*MULTIPLIER - FEES;
+  d=new Date(d.getFullYear(),d.getMonth()+1,1);
 }
-const now = Date.now();
-let modelNow = null;
-for (let i = 1; i < pts.length; i++) {
-  if (pts[i][0] >= now) {
-    const [t0, v0] = pts[i - 1], [t1, v1] = pts[i];
-    modelNow = v0 + (v1 - v0) * (now - t0) / (t1 - t0);
-    break;
-  }
+const now=Date.now(); let modelNow=null;
+for(let i=1;i<pts.length;i++) {
+  if(pts[i][0]>=now) { const [t0,v0]=pts[i-1], [t1,v1]=pts[i]; modelNow=v0+(v1-v0)*(now-t0)/(t1-t0); break; }
 }
-const actual = Number(entity.state);
-const k = (modelNow > 0 && actual > 0) ? actual / modelNow : 1;
-return pts.map(([t, v]) => [t, Math.round(v * k)]);"""
-
-
-PAYBACK_PRODUCTION_JS = """const W = [0.02, 0.04, 0.08, 0.12, 0.14, 0.14, 0.14, 0.12, 0.09, 0.06, 0.03, 0.02];
-const annual = Number(entity.attributes.metine_gamyba) || 11000;
-const modbusStart = new Date(2026, 4, 9);
-const eimoShare = 0.46;
-const pts = [];
-let cum = 0;
-let d = new Date(2026, 1, 1);
-const endD = new Date(2030, 1, 1);
-while (d <= endD) {
-  pts.push([d.getTime(), cum]);
-  cum += annual * W[d.getMonth()] * (d < modbusStart ? eimoShare : 1);
-  d = new Date(d.getFullYear(), d.getMonth() + 1, 1);
-}
-const now = Date.now();
-let modelNow = null;
-for (let i = 1; i < pts.length; i++) {
-  if (pts[i][0] >= now) {
-    const [t0, v0] = pts[i - 1], [t1, v1] = pts[i];
-    modelNow = v0 + (v1 - v0) * (now - t0) / (t1 - t0);
-    break;
-  }
-}
-const actual = Number(entity.state);
-const k = (modelNow > 0 && actual > 0) ? actual / modelNow : 1;
-return pts.map(([t, v]) => [t, Math.round(v * k)]);"""
+const actual=Number(entity.state), k=modelNow>0 && actual>0 ? actual/modelNow : 1;
+return pts.map(([t,v])=>[t,Math.round(v*k)]);
+""".replace("MULTIPLIER", "price*ratio" if savings else "1").replace("FEES", "fee*fees" if savings else "0")
 
 
 def _row(entity: str | None, name: str | None = None, icon: str | None = None) -> Any:
@@ -452,7 +169,7 @@ def _plant_energy(p: Dict[str, Any]) -> Dict[str, Any]:
         "title": "Prognozė ir mokymasis",
         "show_header_toggle": False,
         "entities": _rows(
-            *[_row(entity) for entity in FORECAST_ENTITIES],
+            *[_row(entity) for entity in p["forecast_entities"]],
             _row(p["cons_remaining"], "Likęs suvartojimas šiandien"),
             _row(p["cons_tomorrow"], "Rytojaus suvartojimo prognozė"),
             _row(p["correction"], "Solcast korekcija"),
@@ -756,17 +473,16 @@ def _plant_analysis(p: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _payback_view() -> Dict[str, Any]:
-    # Naudotojo pažymėjimas: bendras „Pagaminta (abi)“ glance rodiklis išimtas,
-    # tačiau ta pati kaupiamoji reikšmė palikta pasirinktame atsipirkimo grafike.
+def _payback_view(p) -> Dict[str, Any]:
+    finance = p["finance"]
+    entities = finance["entities"]
     result_entities = [
-        _row("sensor.solis_s6_eh3p_pv_total_energy_generation", "Šeškiniai", "mdi:solar-panel"),
-        _row("sensor.solis_inverter_1033300254190112_solis_energy_total", "Eimo", "mdi:solar-panel"),
-        _row("sensor.pv_sutaupyta_viso", "Sutaupyta"),
-        _row("sensor.pv_gryna_investicija", "Investicija–parama"),
-        _row("sensor.pv_atsipirkes_procentais", "Atsipirko"),
-        _row("sensor.pv_liko_iki_atsipirkimo", "Liko"),
-        _row("sensor.pv_atsipirkimo_prognoze", "Kada atsipirks"),
+        *[_row(member["entity"], member["label"], "mdi:solar-panel") for member in finance["members"]],
+        _row(entities["savings"], "Sutaupyta"),
+        _row(entities["net"], "Investicija–parama"),
+        _row(entities["percent"], "Atsipirko"),
+        _row(entities["remaining"], "Liko"),
+        _row(entities["date"], "Kada atsipirks"),
     ]
     graph = {
         "type": "custom:apexcharts-card",
@@ -786,17 +502,17 @@ def _payback_view() -> Dict[str, Any]:
         ],
         "series": [
             {
-                "entity": "sensor.pv_sutaupyta_viso",
+                "entity": entities["savings"],
                 "name": "Sutaupyta €",
                 "yaxis_id": "eur",
                 "color": "#4caf50",
                 "stroke_width": 3,
                 "extend_to": False,
                 "show": {"extremas": False},
-                "data_generator": PAYBACK_SAVINGS_JS,
+                "data_generator": payback_generator(finance, savings=True),
             },
             {
-                "entity": "sensor.pv_gryna_investicija",
+                "entity": entities["net"],
                 "name": "Investicija (be paramos)",
                 "yaxis_id": "eur",
                 "color": "#f44336",
@@ -805,12 +521,12 @@ def _payback_view() -> Dict[str, Any]:
                 "show": {"extremas": False},
                 "data_generator": (
                     "const v = Number(entity.state) || 0;\n"
-                    "return [[new Date(2026, 1, 1).getTime(), v], "
-                    "[new Date(2030, 1, 1).getTime(), v]];"
+                    f"return [[new Date({json.dumps(finance['start'])}).getTime(), v], "
+                    f"[new Date({json.dumps(finance['end'])}).getTime(), v]];"
                 ),
             },
             {
-                "entity": "sensor.pv_pagaminta_viso",
+                "entity": entities["production"],
                 "name": "Pagaminta kWh",
                 "yaxis_id": "kwh",
                 "color": "#fbc02d",
@@ -818,7 +534,7 @@ def _payback_view() -> Dict[str, Any]:
                 "opacity": 0.7,
                 "extend_to": False,
                 "show": {"extremas": False},
-                "data_generator": PAYBACK_PRODUCTION_JS,
+                "data_generator": payback_generator(finance),
             },
         ],
     }
@@ -835,11 +551,11 @@ def _payback_view() -> Dict[str, Any]:
                     "show_header_toggle": False,
                     "title": "Įvestis (pildyk ranka)",
                     "entities": [
-                        _row("input_number.pv_investicija", "Investicija (abi elektrinės)"),
-                        _row("input_number.pv_parama", "Parama (APVA)"),
-                        _row("input_number.pv_kwh_verte", "kWh vertė"),
-                        _row("input_number.pv_men_mokestis", "Pasaugojimo mokestis /mėn"),
-                        _row("input_number.pv_metine_gamyba", "Metinė gamyba (prognozė)"),
+                        _row(entities["investment"], "Portfelio investicija"),
+                        _row(entities["grant"], "Parama (APVA)"),
+                        _row(entities["price"], "kWh vertė"),
+                        _row(entities["fee"], "Pasaugojimo mokestis /mėn"),
+                        _row(entities["annual"], "Metinė gamyba (prognozė)"),
                     ],
                 },
                 _glance("Rezultatas", result_entities, 3),
@@ -851,21 +567,24 @@ def _payback_view() -> Dict[str, Any]:
 
 def _profile_markdown(p: Dict[str, Any]) -> str:
     entity = p["consumption_profile"]
-    label = "Namų" if p["site_label"] == "Namai" else p["site_label"]
+    label = p["site_label"]
     return (
         f"### {label} vartojimo profilis\n\n"
-        f"Paros vidurkis **{{{{ state_attr('{entity}','daily_avg') }}}} kWh** "
-        f"· istorijos **{{{{ state_attr('{entity}','data_days') }}}} d.** "
-        f"· modeliui naudota **{{{{ state_attr('{entity}','usable_days') }}}} d.** "
-        f"· anomalijų **{{{{ state_attr('{entity}','anomaly_count') | default(0, true) }}}}** "
-        f"· valandinio mokymosi **{{{{ states('{entity}') }}}} d.**"
+        f"Slenkantis **{{{{ state_attr('{entity}','window_days') }}}} parų** langas: "
+        f"{{{{ state_attr('{entity}','window_start') }}}} – {{{{ state_attr('{entity}','window_end') }}}}.\n\n"
+        f"Paros vidurkis **{{{{ state_attr('{entity}','daily_avg') | round(2, default=0) }}}} kWh** "
+        f"· parų **{{{{ state_attr('{entity}','daily_sample_days') }}}}** "
+        f"· pilnų valandinių parų **{{{{ state_attr('{entity}','hourly_sample_days') }}}}** "
+        f"· atskirtų šuolių **{{{{ state_attr('{entity}','anomaly_count') | default(0, true) }}}}**. "
+        "Nepilna šiandiena ir trūkstamos valandos į vidurkį neįtraukiamos."
     )
+
 
 
 def _hourly_consumption_card(profile: str) -> Dict[str, Any]:
     return {
         "type": "custom:apexcharts-card",
-        "header": {"show": True, "title": "Vartojimas pagal valandą (kWh)"},
+        "header": {"show": True, "title": "Vidutinis vartojimas pagal valandą (kWh)"},
         "graph_span": "24h",
         "span": {"start": "day"},
         "apex_config": {
@@ -887,7 +606,7 @@ def _hourly_consumption_card(profile: str) -> Dict[str, Any]:
 def _weekday_consumption_card(profile: str) -> Dict[str, Any]:
     return {
         "type": "custom:apexcharts-card",
-        "header": {"show": True, "title": "Vartojimas pagal savaitės dieną (kWh)"},
+        "header": {"show": True, "title": "Vidutinis vartojimas pagal savaitės dieną (kWh)"},
         "graph_span": "167h",
         "span": {"start": "isoWeek", "offset": "-7d"},
         "apex_config": {
@@ -964,7 +683,9 @@ def build_dashboard(p: Dict[str, Any]) -> Dict[str, Any]:
     from energy_system.dashboard_design import build_views, button_templates
 
     # Preserve the selected chart definitions and their plant-specific sources.
-    old_views = [_plant_analysis(p), _payback_view(), _plant_consumption(p)]
+    old_views = [_plant_analysis(p), _plant_consumption(p)]
+    if p.get("finance"):
+        old_views.append(_payback_view(p))
     by_title = {}
 
     def collect(value):
@@ -990,9 +711,9 @@ def build_dashboard(p: Dict[str, Any]) -> Dict[str, Any]:
         "spread": "Fazių išsiskyrimas ir įtampos skirtumas (7 d.)",
         "payback_graph": "Atsipirkimas — sutaupyta € ir pagaminta kWh vs investicija",
         "payback_inputs": "Įvestis (pildyk ranka)", "consumption_model": "Vartojimo modelis (AppDaemon)",
-        "hourly": "Vartojimas pagal valandą (kWh)", "weekday": "Vartojimas pagal savaitės dieną (kWh)",
+        "hourly": "Vidutinis vartojimas pagal valandą (kWh)", "weekday": "Vidutinis vartojimas pagal savaitės dieną (kWh)",
     }
-    legacy = {key: by_title[title] for key, title in titles.items()}
+    legacy = {key: by_title[title] for key, title in titles.items() if title in by_title}
     legacy["cable"] = next(card for title, card in by_title.items() if title.startswith("Kabelio nuostoliai"))
     return {
         "title": p["title"],
@@ -1013,7 +734,9 @@ def render_dashboard(site: str, output_dir: Path = PREVIEW_DIR) -> bool:
     old = path.read_text(encoding="utf-8") if path.exists() else None
     if old == text:
         return False
-    path.write_text(text, encoding="utf-8")
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(text, encoding="utf-8")
+    temporary.replace(path)
     return True
 
 

@@ -1,0 +1,739 @@
+{
+  "schema_version": 1,
+  "energy": {
+    "HORIZON": {
+      "comfort_soc": 20.0,
+      "reserve_margin_kwh": 0.5,
+      "storage_ceiling": 95.0,
+      "charge_kw": 6.4,
+      "discharge_kw": 3.0,
+      "burst_kwh": 0.75
+    },
+    "KEY": "home",
+    "SITE_LABEL": "Namai",
+    "SOC_BUFFER": {
+      "min": "number.solis_s6_eh3p_overdischarge_soc",
+      "max": "number.solis_s6_eh3p_max_charge_soc",
+      "heartbeat": "sensor.solis_s6_eh3p_last_modbus_success",
+      "max_age": 180,
+      "voltages": [
+        "sensor.solis_s6_eh3p_meter_ac_voltage_a",
+        "sensor.solis_s6_eh3p_meter_ac_voltage_b",
+        "sensor.solis_s6_eh3p_meter_ac_voltage_c"
+      ],
+      "frequency": "sensor.solis_s6_eh3p_grid_frequency",
+      "charge_current": "sensor.solis_s6_eh3p_battery_charge_current_limitation_bms",
+      "battery_voltage": "sensor.solis_s6_eh3p_battery_voltage"
+    },
+    "BATTERY_USABLE_KWH": 14.4,
+    "KWH_PER_SOC": 0.16,
+    "MIN_SOC": 13,
+    "PLAN_HARD_FLOOR": 13,
+    "NIGHT_REST_SOC": 16,
+    "FORECAST_SOURCE_LABEL": "Solcast seskiniu_2 (kalibruota Namų elektrinei)",
+    "CORRECTION_FILE": "{apps_dir}/forecast_correction.json",
+    "TARGET_SOC_FILE": "{apps_dir}/target_soc.json",
+    "TACTICAL_INTERVAL": 10,
+    "CORE_VERSION": "4.5-site-profiles",
+    "CORE_NAME": "Valdymo koordinatorius",
+    "TELEMETRY_MAX_AGE_SECONDS": {
+      "soc": 600,
+      "pv_power": 900
+    },
+    "TELEMETRY_HEARTBEAT": {
+      "soc": {
+        "$ref": "energy.SOC_BUFFER.heartbeat"
+      }
+    },
+    "TELEMETRY_REQUIRED": [
+      "soc"
+    ],
+    "TELEMETRY_ALLOW_UNKNOWN_TIMESTAMP": true,
+    "MODULES_ENABLED": [
+      "planner",
+      "forecast",
+      "consumption",
+      "battery_health",
+      "safety"
+    ],
+    "DASHBOARD_VISIBILITY_DEFAULT": {
+      "overview": true,
+      "forecast": true,
+      "diagnostics": true,
+      "boiler": true
+    },
+    "BOILER_ENABLED": true,
+    "BATTERY_DISCHARGE_SIGN": 1.0,
+    "INVERTER_CONTROL_AVAILABLE": true,
+    "SEASON_SOC_MIN": {
+      "žiema": 80,
+      "pavasaris": 60,
+      "vasara": 10,
+      "ruduo": 60
+    },
+    "CONSUMPTION_TOMORROW_SENSOR": "sensor.consumption_forecast_tomorrow",
+    "CONSUMPTION_REMAINING_SENSOR": "sensor.consumption_remaining_today",
+    "SENSOR": {
+      "solcast_today": "sensor.solcast_pv_forecast_forecast_remaining_today",
+      "solcast_tomorrow": "sensor.solcast_pv_forecast_forecast_tomorrow",
+      "soc": "sensor.solis_s6_eh3p_battery_soc",
+      "pv_power": "sensor.solis_s6_eh3p_total_pv_power",
+      "house_load": "sensor.solis_s6_eh3p_household_load_power",
+      "grid_power": "sensor.solis_s6_eh3p_grid_power_net",
+      "export_limit": "number.solis_s6_eh3p_backflow_power",
+      "boiler_temp": "sensor.boiler_temperature",
+      "boiler_switch": "switch.boiler_switch",
+      "season": "input_select.energy_season",
+      "storm_mode": "input_boolean.storm_mode",
+      "manual_override": "input_boolean.manual_tou_override",
+      "inverter_temp": "sensor.solis_s6_eh3p_temperature",
+      "pv_today": "sensor.solis_s6_eh3p_pv_today_energy_generation",
+      "consumption_today": "sensor.solis_s6_eh3p_today_energy_consumption",
+      "solcast_today_total": "sensor.solcast_pv_forecast_forecast_today",
+      "battery_power": "sensor.solis_s6_eh3p_battery_power_net",
+      "power_state": "switch.solis_s6_eh3p_power_state",
+      "price_buy": "input_number.electricity_price_buy",
+      "price_sell": "input_number.electricity_price_sell",
+      "daytime_export_floor": "input_number.daytime_export_floor",
+      "consumption_profile": "sensor.consumption_profile",
+      "intraday_ratio": "sensor.solcast_intraday_ratio",
+      "sun": "sun.sun"
+    },
+    "ACTUATOR": {
+      "mode": "select.solis_s6_eh3p_work_mode",
+      "mode_by_plan": {
+        "self_use": "Self-Use",
+        "feed_in": "Feed-in Priority",
+        "night_export": "Feed-in Priority"
+      },
+      "mode_aliases": {
+        "Self-Use": [
+          "Self-Use + TOU"
+        ],
+        "Feed-in Priority": [
+          "Feed-in Priority + TOU"
+        ]
+      },
+      "slot": "switch.solis_s6_eh3p_grid_time_of_use_discharge_period_1",
+      "slot_cutoff": "number.solis_s6_eh3p_grid_time_of_use_discharge_cut_off_soc_slot_1",
+      "slot_cutoff_tolerance": 1.0,
+      "exclusive_off": [
+        "switch.solis_s6_eh3p_grid_time_of_use_discharge_period_2",
+        "switch.solis_s6_eh3p_grid_time_of_use_discharge_period_3",
+        "switch.solis_s6_eh3p_grid_time_of_use_discharge_period_4",
+        "switch.solis_s6_eh3p_grid_time_of_use_discharge_period_5",
+        "switch.solis_s6_eh3p_grid_time_of_use_discharge_period_6"
+      ],
+      "power": {
+        "$ref": "energy.SENSOR.power_state"
+      }
+    },
+    "EXECUTOR_ENTITY": "automation.solis_planas_bazinio_rezimo_vykdymas",
+    "EXECUTOR_SETTLE_SECONDS": 45,
+    "OUTPUT": {
+      "decision": "sensor.energy_manager_decision",
+      "balance": "sensor.energy_manager_balance",
+      "surplus_now": "sensor.energy_manager_surplus_now",
+      "target_soc": "sensor.energy_manager_target_soc",
+      "inverter_temp": "sensor.energy_manager_inverter_temp",
+      "boiler_status": "sensor.energy_manager_boiler_status",
+      "room_shortfall": "sensor.energy_manager_room_shortfall",
+      "night_economics": "sensor.inverter_night_economics",
+      "shutdown_eta": "sensor.inverter_shutdown_eta",
+      "morning_on_time": "sensor.inverter_morning_on_time",
+      "cons_until_production": "sensor.energy_manager_cons_until_production",
+      "correction_factor": "sensor.solcast_correction_factor",
+      "plan_mode": "sensor.solis_plan_mode",
+      "plan_target_soc": "sensor.solis_plan_target_soc",
+      "plan_slot_active": "sensor.solis_plan_slot_active",
+      "plan_slot_cutoff_soc": "sensor.solis_plan_slot_cutoff_soc",
+      "plan_inverter_on": "sensor.solis_plan_inverter_on",
+      "plan": "sensor.solis_plan",
+      "horizon": "sensor.solis_energy_horizon",
+      "planner_health": "sensor.solis_planner_health",
+      "executor_health": "sensor.solis_executor_health",
+      "core_state": "sensor.solis_core_state",
+      "telemetry_health": "sensor.solis_telemetry_health",
+      "coordinator": "sensor.solis_control_coordinator"
+    },
+    "SHADOW_OUTPUT": {
+      "plan": "sensor.solis_shadow_plan",
+      "check": "sensor.solis_shadow_check",
+      "commands": "sensor.solis_shadow_commands"
+    },
+    "TRANSPORT": "modbus"
+  },
+  "consumption": {
+    "KEY": "home",
+    "SITE_LABEL": "Namai",
+    "SOC_BUFFER": {
+      "min": {
+        "$ref": "energy.SOC_BUFFER.min"
+      },
+      "max": {
+        "$ref": "energy.SOC_BUFFER.max"
+      },
+      "heartbeat": {
+        "$ref": "energy.SOC_BUFFER.heartbeat"
+      },
+      "max_age": 180,
+      "voltages": [
+        {
+          "$ref": "energy.SOC_BUFFER.voltages.0"
+        },
+        {
+          "$ref": "energy.SOC_BUFFER.voltages.1"
+        },
+        {
+          "$ref": "energy.SOC_BUFFER.voltages.2"
+        }
+      ],
+      "frequency": {
+        "$ref": "energy.SOC_BUFFER.frequency"
+      },
+      "charge_current": {
+        "$ref": "energy.SOC_BUFFER.charge_current"
+      },
+      "battery_voltage": {
+        "$ref": "energy.SOC_BUFFER.battery_voltage"
+      }
+    },
+    "WEATHER_URL": "https://api.open-meteo.com/v1/forecast?latitude=54.45612&longitude=23.02449&daily=temperature_2m_mean,temperature_2m_max&past_days=92&forecast_days=2&timezone=Europe%2FVilnius",
+    "ESO_CSV_FILE": "{apps_dir}/eso_data.csv",
+    "MODEL_FILE": "{apps_dir}/consumption_model.json",
+    "MANUAL_EVENT": "CONSUMPTION_MODEL_RUN",
+    "SENSOR": {
+      "house_load": {
+        "$ref": "energy.SENSOR.house_load"
+      },
+      "daily_consumption": "sensor.solis_s6_eh3p_yesterday_energy_consumption",
+      "today_consumption": {
+        "$ref": "energy.SENSOR.consumption_today"
+      },
+      "season": {
+        "$ref": "energy.SENSOR.season"
+      }
+    },
+    "OUTPUT": {
+      "remaining": {
+        "$ref": "energy.CONSUMPTION_REMAINING_SENSOR"
+      },
+      "tomorrow": {
+        "$ref": "energy.CONSUMPTION_TOMORROW_SENSOR"
+      },
+      "daily_avg": "sensor.consumption_daily_avg",
+      "profile": {
+        "$ref": "energy.SENSOR.consumption_profile"
+      }
+    }
+  },
+  "power_quality": {
+    "key": "home",
+    "label": "Namai",
+    "sample_interval_seconds": 60,
+    "publish_interval_seconds": 300,
+    "max_source_age_seconds": 180,
+    "history_days": 14,
+    "history_file": "{apps_dir}/data/power_quality_home.json",
+    "heartbeat": {
+      "$ref": "energy.SOC_BUFFER.heartbeat"
+    },
+    "heartbeat_kind": "iso_datetime",
+    "append_only_on_new_heartbeat": false,
+    "entities": {
+      "pcc_voltage_v": [
+        {
+          "$ref": "energy.SOC_BUFFER.voltages.0"
+        },
+        {
+          "$ref": "energy.SOC_BUFFER.voltages.1"
+        },
+        {
+          "$ref": "energy.SOC_BUFFER.voltages.2"
+        }
+      ],
+      "inverter_voltage_v": [
+        "sensor.solis_s6_eh3p_a_phase_voltage",
+        "sensor.solis_s6_eh3p_b_phase_voltage",
+        "sensor.solis_s6_eh3p_c_phase_voltage"
+      ],
+      "pcc_active_w": [
+        "sensor.solis_s6_eh3p_meter_active_power_a",
+        "sensor.solis_s6_eh3p_meter_active_power_b",
+        "sensor.solis_s6_eh3p_meter_active_power_c"
+      ],
+      "pcc_reactive_var": [
+        "sensor.solis_s6_eh3p_meter_reactive_power_a",
+        "sensor.solis_s6_eh3p_meter_reactive_power_b",
+        "sensor.solis_s6_eh3p_meter_reactive_power_c"
+      ],
+      "pcc_apparent_va": [
+        "sensor.solis_s6_eh3p_meter_apparent_power_a",
+        "sensor.solis_s6_eh3p_meter_apparent_power_b",
+        "sensor.solis_s6_eh3p_meter_apparent_power_c"
+      ],
+      "inverter_current_a": [
+        "sensor.solis_s6_eh3p_a_phase_current",
+        "sensor.solis_s6_eh3p_b_phase_current",
+        "sensor.solis_s6_eh3p_c_phase_current"
+      ],
+      "frequency_hz": {
+        "$ref": "energy.SOC_BUFFER.frequency"
+      }
+    },
+    "outputs": {
+      "state": "sensor.solis_power_quality_state",
+      "voltage_min": "sensor.solis_power_quality_voltage_min",
+      "voltage_max": "sensor.solis_power_quality_voltage_max",
+      "voltage_spread": "sensor.solis_power_quality_voltage_spread",
+      "active_power": "sensor.solis_power_quality_active_power",
+      "reactive_power": "sensor.solis_power_quality_reactive_power",
+      "power_factor": "sensor.solis_power_quality_power_factor",
+      "frequency": "sensor.solis_power_quality_frequency",
+      "voltage_rise": "sensor.solis_power_quality_voltage_rise",
+      "active_imbalance": "sensor.solis_power_quality_active_imbalance",
+      "current_imbalance": "sensor.solis_power_quality_current_imbalance"
+    },
+    "save_every_samples": 60
+  },
+  "dashboard": {
+    "title": "Namai SE",
+    "file": "energijos_valdymas.yaml",
+    "site_label": "Namai",
+    "soc": {
+      "$ref": "energy.SENSOR.soc"
+    },
+    "pv": {
+      "$ref": "energy.SENSOR.pv_power"
+    },
+    "load": {
+      "$ref": "energy.SENSOR.house_load"
+    },
+    "grid": {
+      "$ref": "energy.SENSOR.grid_power"
+    },
+    "battery": {
+      "$ref": "energy.SENSOR.battery_power"
+    },
+    "plan": {
+      "$ref": "energy.OUTPUT.plan"
+    },
+    "plan_mode": {
+      "$ref": "energy.OUTPUT.plan_mode"
+    },
+    "target": {
+      "$ref": "energy.OUTPUT.plan_target_soc"
+    },
+    "core": {
+      "$ref": "energy.OUTPUT.core_state"
+    },
+    "telemetry": {
+      "$ref": "energy.OUTPUT.telemetry_health"
+    },
+    "coordinator": {
+      "$ref": "energy.OUTPUT.coordinator"
+    },
+    "planner": {
+      "$ref": "energy.OUTPUT.planner_health"
+    },
+    "executor": {
+      "$ref": "energy.OUTPUT.executor_health"
+    },
+    "shadow": {
+      "$ref": "energy.SHADOW_OUTPUT.check"
+    },
+    "shadow_plan": {
+      "$ref": "energy.SHADOW_OUTPUT.plan"
+    },
+    "shadow_cmd": {
+      "$ref": "energy.SHADOW_OUTPUT.commands"
+    },
+    "decision": {
+      "$ref": "energy.OUTPUT.decision"
+    },
+    "balance": {
+      "$ref": "energy.OUTPUT.balance"
+    },
+    "surplus": {
+      "$ref": "energy.OUTPUT.surplus_now"
+    },
+    "room": {
+      "$ref": "energy.OUTPUT.room_shortfall"
+    },
+    "cons_remaining": {
+      "$ref": "energy.CONSUMPTION_REMAINING_SENSOR"
+    },
+    "cons_tomorrow": {
+      "$ref": "energy.CONSUMPTION_TOMORROW_SENSOR"
+    },
+    "correction": {
+      "$ref": "energy.OUTPUT.correction_factor"
+    },
+    "boiler": {
+      "$ref": "energy.OUTPUT.boiler_status"
+    },
+    "storm": {
+      "$ref": "energy.SENSOR.storm_mode"
+    },
+    "manual": {
+      "$ref": "energy.SENSOR.manual_override"
+    },
+    "manual_soc": "input_boolean.manual_soc_override",
+    "toggles": {
+      "forecast": "input_boolean.namai_dashboard_prognoze",
+      "diagnostics": "input_boolean.namai_dashboard_diagnostika",
+      "control": "input_boolean.namai_dashboard_valdymas",
+      "graphs": "input_boolean.namai_dashboard_grafikai",
+      "boiler": "input_boolean.namai_dashboard_boileris"
+    },
+    "analysis": {
+      "today": {
+        "savings": "sensor.energy_savings_today",
+        "consumption": {
+          "$ref": "energy.SENSOR.consumption_today"
+        },
+        "import": "sensor.solis_s6_eh3p_today_energy_imported_from_grid",
+        "export": "sensor.solis_s6_eh3p_today_energy_fed_into_grid"
+      },
+      "consumption_model": {
+        "daily_avg": {
+          "$ref": "consumption.OUTPUT.daily_avg"
+        },
+        "remaining": {
+          "$ref": "energy.CONSUMPTION_REMAINING_SENSOR"
+        },
+        "tomorrow": {
+          "$ref": "energy.CONSUMPTION_TOMORROW_SENSOR"
+        }
+      },
+      "phases": {
+        "voltage": [
+          {
+            "$ref": "energy.SOC_BUFFER.voltages.0"
+          },
+          {
+            "$ref": "energy.SOC_BUFFER.voltages.1"
+          },
+          {
+            "$ref": "energy.SOC_BUFFER.voltages.2"
+          }
+        ],
+        "grid": [
+          {
+            "$ref": "power_quality.entities.pcc_active_w.0"
+          },
+          {
+            "$ref": "power_quality.entities.pcc_active_w.1"
+          },
+          {
+            "$ref": "power_quality.entities.pcc_active_w.2"
+          }
+        ],
+        "inverter": [
+          "sensor.inverter_phase_power_l1",
+          "sensor.inverter_phase_power_l2",
+          "sensor.inverter_phase_power_l3"
+        ]
+      },
+      "battery_health": {
+        "soh": "sensor.solis_s6_eh3p_battery_soh",
+        "cycles": "sensor.battery_equivalent_cycles",
+        "charged_today": "sensor.solis_s6_eh3p_today_battery_charge_energy",
+        "discharged_today": "sensor.solis_s6_eh3p_today_battery_discharge_energy"
+      },
+      "inverter": {
+        "temperature": {
+          "$ref": "energy.SENSOR.inverter_temp"
+        },
+        "status": "sensor.solis_s6_eh3p_status_string",
+        "frequency": {
+          "$ref": "energy.SOC_BUFFER.frequency"
+        }
+      },
+      "efficiency": [
+        [
+          "sensor.system_efficiency",
+          "Sistema"
+        ],
+        [
+          "sensor.battery_roundtrip_efficiency",
+          "Baterija"
+        ],
+        [
+          "sensor.battery_losses_total",
+          "Bat. nuostoliai"
+        ],
+        [
+          "sensor.inverter_losses_total",
+          "Inv. nuostoliai"
+        ],
+        [
+          {
+            "$ref": "dashboard.analysis.battery_health.cycles"
+          },
+          "Bat. ciklai"
+        ]
+      ],
+      "cable": {
+        "title": "Kabelio nuostoliai (50 m, 5×6 mm²)",
+        "entities": [
+          [
+            "sensor.cable_loss_power",
+            "Dabar"
+          ],
+          [
+            "sensor.cable_loss_percent",
+            "Nuo srauto"
+          ],
+          [
+            "sensor.kabelio_nuostoliai_siandien",
+            "Šiandien"
+          ],
+          [
+            "sensor.cable_loss_energy",
+            "Iš viso"
+          ]
+        ]
+      },
+      "daily_balance": [
+        [
+          {
+            "$ref": "energy.SENSOR.pv_today"
+          },
+          "Saulė",
+          "#fbc02d"
+        ],
+        [
+          {
+            "$ref": "energy.SENSOR.consumption_today"
+          },
+          "Suvartota",
+          "#f44336"
+        ],
+        [
+          {
+            "$ref": "dashboard.analysis.today.export"
+          },
+          "Parduota",
+          "#4caf50"
+        ],
+        [
+          {
+            "$ref": "dashboard.analysis.today.import"
+          },
+          "Pirkta",
+          "#9e9e9e"
+        ]
+      ],
+      "temperature": {
+        "$ref": "energy.SENSOR.inverter_temp"
+      },
+      "battery_efficiency": {
+        "$ref": "dashboard.analysis.efficiency.1.0"
+      },
+      "forecast_accuracy": "sensor.solcast_forecast_yesterday_accuracy",
+      "quality": {
+        "state": {
+          "$ref": "power_quality.outputs.state"
+        },
+        "voltage_min": {
+          "$ref": "power_quality.outputs.voltage_min"
+        },
+        "voltage_max": {
+          "$ref": "power_quality.outputs.voltage_max"
+        },
+        "spread": {
+          "$ref": "power_quality.outputs.voltage_spread"
+        },
+        "active": {
+          "$ref": "power_quality.outputs.active_power"
+        },
+        "reactive": {
+          "$ref": "power_quality.outputs.reactive_power"
+        },
+        "pf": {
+          "$ref": "power_quality.outputs.power_factor"
+        },
+        "frequency": {
+          "$ref": "power_quality.outputs.frequency"
+        },
+        "rise": {
+          "$ref": "power_quality.outputs.voltage_rise"
+        },
+        "active_imbalance": {
+          "$ref": "power_quality.outputs.active_imbalance"
+        },
+        "current_imbalance": {
+          "$ref": "power_quality.outputs.current_imbalance"
+        }
+      }
+    },
+    "consumption_profile": {
+      "$ref": "energy.SENSOR.consumption_profile"
+    },
+    "eso_import": "eso:energy_consumed_220588",
+    "eso_export": "eso:energy_returned_220588",
+    "horizon": {
+      "$ref": "energy.OUTPUT.horizon"
+    },
+    "power": {
+      "$ref": "energy.SENSOR.power_state"
+    },
+    "heartbeat": {
+      "$ref": "energy.SOC_BUFFER.heartbeat"
+    },
+    "grid_sign": 1,
+    "battery_sign": 1,
+    "heartbeat_max_age": 180,
+    "url": "energijos-valdymas",
+    "bank": "sensor.eso_bankas_likutis",
+    "bank_official": "sensor.eso_bankas_220588",
+    "bank_value": "sensor.eso_bankas_verte",
+    "bank_import": "sensor.eso_ivado_importas",
+    "bank_export": "sensor.eso_ivado_eksportas",
+    "site": "home",
+    "locale": "lt-LT",
+    "timezone": "Europe/Vilnius",
+    "portfolio": "combined",
+    "forecast_entities": [
+      {
+        "$ref": "energy.SENSOR.solcast_today"
+      },
+      {
+        "$ref": "energy.SENSOR.solcast_today_total"
+      },
+      {
+        "$ref": "energy.SENSOR.solcast_tomorrow"
+      },
+      "sensor.solcast_pv_forecast_peak_forecast_today",
+      "sensor.solcast_pv_forecast_power_now",
+      "sensor.solcast_pv_forecast_power_in_1_hour"
+    ],
+    "boiler_enabled": true
+  },
+  "execution": {
+    "adapter": "modbus",
+    "automation_id": "solis_plan_apply_mode",
+    "inputs": {
+      "plan_entity": {
+        "$ref": "energy.OUTPUT.plan"
+      },
+      "planner_entity": {
+        "$ref": "energy.OUTPUT.planner_health"
+      },
+      "executor_health": {
+        "$ref": "energy.OUTPUT.executor_health"
+      },
+      "storm_entity": {
+        "$ref": "energy.SENSOR.storm_mode"
+      },
+      "hard_floor": 13,
+      "planner_max_age": 180,
+      "discharge_current": 150,
+      "manual_entity": {
+        "$ref": "energy.SENSOR.manual_override"
+      },
+      "manual_soc_entity": {
+        "$ref": "dashboard.manual_soc"
+      },
+      "mode_entity": {
+        "$ref": "energy.ACTUATOR.mode"
+      },
+      "slot_entity": {
+        "$ref": "energy.ACTUATOR.slot"
+      },
+      "cutoff_entity": {
+        "$ref": "energy.ACTUATOR.slot_cutoff"
+      },
+      "power_entity": {
+        "$ref": "energy.SENSOR.power_state"
+      },
+      "start_entity": "time.solis_s6_eh3p_grid_time_of_use_discharge_start_slot_1",
+      "end_entity": "time.solis_s6_eh3p_grid_time_of_use_discharge_end_slot_1",
+      "current_entity": "number.solis_s6_eh3p_grid_time_of_use_discharge_battery_current_slot_1",
+      "self_use_mode": "Self-Use",
+      "feed_in_mode": "Feed-in Priority",
+      "self_use_aliases": [
+        "Self-Use",
+        "Self-Use + TOU"
+      ],
+      "feed_in_aliases": [
+        "Feed-in Priority",
+        "Feed-in Priority + TOU"
+      ]
+    }
+  },
+  "battery_health": {
+    "BATTERY_CAPACITY_KWH": 16.0,
+    "TEMP_WARNING": 40.0,
+    "TEMP_CRITICAL": 45.0,
+    "TEMP_LOW": 5.0,
+    "SOH_WARNING": 85.0,
+    "SOH_CRITICAL": 75.0,
+    "EFFICIENCY_MIN": 88.0,
+    "CYCLES_WARNING": 3000,
+    "BATTERY_USABLE_KWH": 14.4,
+    "SENSOR": {
+      "temp": "sensor.solis_s6_eh3p_battery_temperature_bms",
+      "soc": {
+        "$ref": "energy.SENSOR.soc"
+      },
+      "soh": {
+        "$ref": "dashboard.analysis.battery_health.soh"
+      },
+      "voltage": {
+        "$ref": "energy.SOC_BUFFER.battery_voltage"
+      },
+      "current": "sensor.solis_s6_eh3p_battery_current",
+      "charge": {
+        "$ref": "dashboard.analysis.battery_health.charged_today"
+      },
+      "discharge": {
+        "$ref": "dashboard.analysis.battery_health.discharged_today"
+      },
+      "total_charge": "sensor.solis_s6_eh3p_total_battery_charge_energy",
+      "inv_self": "sensor.inverterio_savivarta_is_baterijos_siandien"
+    },
+    "HISTORY_FILE": "{apps_dir}/battery_history.json"
+  },
+  "weekly_report": {
+    "ELECTRICITY_PRICE_BUY": 0.18,
+    "ELECTRICITY_PRICE_SELL": 0.08,
+    "NOTIFY_SERVICE": "notify/persistent_notification",
+    "BATTERY_USABLE_KWH": 14.4,
+    "SENSOR": {
+      "pv_week": "sensor.savaites_pv_generacija",
+      "grid_buy_week": "sensor.savaites_pirkimas_is_tinklo",
+      "grid_sell_week": "sensor.savaites_pardavimas_i_tinkla",
+      "house_week": "sensor.savaites_namu_suvartojimas",
+      "boiler_week": "sensor.energy_boiler_week",
+      "solcast_week": "sensor.solcast_forecast_this_week",
+      "soc": {
+        "$ref": "energy.SENSOR.soc"
+      },
+      "total_charge": {
+        "$ref": "battery_health.SENSOR.total_charge"
+      }
+    },
+    "DAILY_SENSOR": {
+      "pv": {
+        "$ref": "energy.SENSOR.pv_today"
+      },
+      "house": "sensor.solis_s6_eh3p_household_load_today_energy",
+      "sell": {
+        "$ref": "dashboard.analysis.today.export"
+      },
+      "buy": {
+        "$ref": "dashboard.analysis.today.import"
+      },
+      "boiler": "sensor.energy_boiler_today"
+    },
+    "REPORT_FILE": "{apps_dir}/weekly_reports.json",
+    "PRICE_BUY_ENTITY": {
+      "$ref": "energy.SENSOR.price_buy"
+    },
+    "PRICE_SELL_ENTITY": {
+      "$ref": "energy.SENSOR.price_sell"
+    }
+  }
+}

@@ -1,15 +1,25 @@
-name: Predictive headroom validation
+name: Shared plant and consumption validation
 
 on:
   push:
     branches: [main, codex/eimo-unified-20260912]
     paths:
       - "energy_system/**"
+      - "plant_apps.py"
+      - "apps.yaml"
+      - "battery_health.py"
+      - "weekly_report.py"
+      - "power_quality_manager.py"
       - "tests/test_*.py"
       - ".github/workflows/headroom-validation.yml"
   pull_request:
     paths:
       - "energy_system/**"
+      - "plant_apps.py"
+      - "apps.yaml"
+      - "battery_health.py"
+      - "weekly_report.py"
+      - "power_quality_manager.py"
       - "tests/test_*.py"
       - ".github/workflows/headroom-validation.yml"
   workflow_dispatch:

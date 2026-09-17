@@ -27,15 +27,6 @@ _REQUIRED_ACTUATOR_KEYS = {
 }
 _FORBIDDEN_ENTITY_TEXT = ("over-discharge", "overdischarge")
 
-# Šie objektai yra bendri tik skaitymui (orų / saulės šaltinis), todėl jų
-# dalijimasis tarp profilių nėra valdymo konflikto požymis.
-_SHARED_READ_ONLY_ENTITIES = {
-    "sensor.solcast_pv_forecast_forecast_remaining_today",
-    "sensor.solcast_pv_forecast_forecast_tomorrow",
-    "sensor.solcast_pv_forecast_forecast_today",
-    "sun.sun",
-}
-
 
 def _entity_values(profile: Mapping) -> list[str]:
     values = []
@@ -114,14 +105,13 @@ def validate_profiles(profiles: Iterable[Mapping]) -> tuple[str, ...]:
             f"{profile.get('KEY', 'unknown')}:{issue}"
             for issue in validate_profile(profile)
         )
-    # Vienodas entity ID tarp dviejų profilių būtų pavojingas net jei jų
-    # friendly_name skiriasi.
+    # Read-only telemetry can be shared. Writable ownership cannot.
     seen = {}
     for profile in profiles:
         site = profile.get("KEY", "unknown")
-        for entity in _entity_values(profile):
-            if entity in _SHARED_READ_ONLY_ENTITIES:
-                continue
+        owned = {k: profile.get(k, {}) for k in ("ACTUATOR", "OUTPUT")}
+        owned["EXECUTOR_ENTITY"] = profile.get("EXECUTOR_ENTITY", "")
+        for entity in _entity_values(owned):
             owner = seen.get(entity)
             if owner and owner != site:
                 issues.append(f"cross_site_entity:{entity}:{owner}!={site}")

@@ -1,0 +1,69 @@
+{
+  "energy": {
+    "BOILER_POWER_KW": 2.2,
+    "ESO_EXPORT_LIMIT_KW": 1.0,
+    "CONS_BASE_KW": 0.3,
+    "PLAN_MARGIN": 1.25,
+    "PLAN_TARGET_BAND_FLOOR": 20,
+    "PLAN_TARGET_BAND_CEILING": 85,
+    "EXTRA_HEADROOM_SOC": 8.0,
+    "HEADROOM_EXECUTION_MINUTES": 5.0,
+    "INVERTER_SELF_KW": 0.13,
+    "INVERTER_IDLE_W": 130.0,
+    "INVERTER_OFF_W": 30.0,
+    "PRICE_BUY_DEFAULT": 0.18,
+    "PRICE_SELL_DEFAULT": 0.08,
+    "CORRECTION_ALPHA": 0.2,
+    "CORRECTION_MIN": 0.7,
+    "CORRECTION_MAX": 1.3,
+    "HOURLY_MIN_DAYS": 7,
+    "HOURLY_FC_MIN_KWH": 0.05,
+    "HOURLY_RATIO_MIN": 0.3,
+    "HOURLY_RATIO_MAX": 2.0,
+    "HOURLY_FACTOR_MIN": 0.4,
+    "HOURLY_FACTOR_MAX": 1.6,
+    "MORNING_PV_THRESHOLD_KW": 0.1,
+    "MORNING_ON_MARGIN_MIN": 30,
+    "BOILER_TEMP_MAX": 75.0,
+    "BOILER_TEMP_WINTER": 70.0,
+    "BOILER_TEMP_SUMMER": 55.0,
+    "BALANCE_MIN_KWH": 0.0,
+    "SOC_HIGH_THRESHOLD": 90.0,
+    "SOC_TARGET_CHARGE": 95.0,
+    "SOC_DROP_RATE_MAX": 2.0,
+    "SURPLUS_MIN_KW": 0.3,
+    "DEFAULT_DAILY_CONSUMPTION": 13.0,
+    "HORIZON": {
+      "comfort_soc": 20.0,
+      "reserve_margin_kwh": 0.5,
+      "storage_ceiling": 95.0,
+      "charge_kw": 3.0,
+      "discharge_kw": 3.0,
+      "burst_kwh": 0.75
+    }
+  },
+  "consumption": {
+    "HISTORY_MAX_DAYS": 120,
+    "HISTORY_MIN_DAYS": 5,
+    "PROFILE_MIN_TOTAL": 1.0,
+    "DEFAULT_DAILY_KWH": 15.0,
+    "DEFAULT_WEEKDAY_FACTORS": {
+      "0": 1.15,
+      "1": 1.1,
+      "2": 1.1,
+      "3": 1.1,
+      "4": 1.05,
+      "5": 0.85,
+      "6": 0.9
+    },
+    "DEFAULT_SEASON_FACTORS": {
+      "žiema": 1.35,
+      "pavasaris": 0.95,
+      "vasara": 0.8,
+      "ruduo": 1.05
+    },
+    "ROLLING_WINDOW_DAYS": 30,
+    "TIMEZONE": "Europe/Vilnius",
+    "DAILY_UPDATE_TIME": "00:20:00"
+  }
+}

@@ -5,30 +5,8 @@ Horizon is read as a forecast; the committed plan is the action source of truth.
 """
 from copy import deepcopy
 
-VERSION = "2.1"
+VERSION = "3.0-site-profiles"
 COLORS = {"pv": "#d99a18", "load": "#4789e8", "battery": "#159b85", "grid": "#8973cf"}
-
-EXTRA = {
-    "Namai": {
-        "horizon": "sensor.solis_energy_horizon",
-        "power": "switch.solis_s6_eh3p_power_state",
-        "heartbeat": "sensor.solis_s6_eh3p_last_modbus_success",
-        "grid_sign": 1, "battery_sign": 1, "heartbeat_max_age": 180,
-        "url": "namai-se-perziura", "other_url": "eimo-se-perziura", "other_name": "Eimo SE",
-        "bank": "sensor.eso_bankas_likutis", "bank_official": "sensor.eso_bankas_220588",
-        "bank_value": "sensor.eso_bankas_verte", "bank_import": "sensor.eso_ivado_importas",
-        "bank_export": "sensor.eso_ivado_eksportas",
-    },
-    "Eimo": {
-        "horizon": "sensor.eimo_energy_horizon", "power": None,
-        "heartbeat": "sensor.solis_inverter_1033300254190112_solis_timestamp_measurements_received", "heartbeat_max_age": 900,
-        "grid_sign": -1, "battery_sign": -1,
-        "url": "eimo-se-perziura", "other_url": "namai-se-perziura", "other_name": "Namai SE",
-        "bank": "sensor.eso_bankas_likutis_eimo", "bank_official": "sensor.eso_bankas_266493",
-        "bank_value": "sensor.eso_bankas_verte_eimo", "bank_import": "sensor.eso_ivado_importas_eimo",
-        "bank_export": "sensor.eso_ivado_eksportas_eimo",
-    },
-}
 
 # Scoped inside button-card's shadow root. Uses HA colors in both theme modes.
 PANEL_CSS = """
@@ -54,21 +32,21 @@ const a = id => states[id]?.attributes || {};
 const s = id => states[id]?.state;
 const num = v => v !== null && v !== undefined && String(v).trim() !== '' && Number.isFinite(Number(v)) ? Number(v) : null;
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const fmt = (v,d=1) => num(v) === null ? '—' : new Intl.NumberFormat('lt-LT',{maximumFractionDigits:d,minimumFractionDigits:d}).format(Number(v));
+const fmt = (v,d=1) => num(v) === null ? '—' : new Intl.NumberFormat(p.locale || 'lt-LT',{maximumFractionDigits:d,minimumFractionDigits:d}).format(Number(v));
 const on = v => v === true || v === 'on' || v === 'true';
 const h = a(p.horizon), plan = a(p.plan), health = a(p.telemetry);
 const ts = v => v && Number.isFinite(Date.parse(v)) ? Date.parse(v) : null;
 const now = Date.now();
 const expiry = ts(h.expires_at), calculated = ts(h.calculated_at);
 const forecastOK = on(h.valid) && expiry !== null && expiry > now && calculated !== null && calculated <= now + 60000;
-const planTime = ts(plan.committed_at);
-const planFresh = planTime !== null && now - planTime < 600000 && planTime <= now + 60000;
+const planTime = ts(plan.evaluated_at), planExpiry = ts(plan.valid_until);
+const planFresh = planTime !== null && planTime <= now + 60000 && planExpiry !== null && planExpiry > now;
 const hbRaw=s(p.heartbeat);
 const hb = num(hbRaw)!==null ? Number(hbRaw)*1000 : ts(hbRaw);
 const teleFresh = s(p.telemetry) === 'ok' && (!p.heartbeat || (hb !== null && now - hb >= -60000 && now - hb < (p.heartbeat_max_age || 180)*1000));
 const actionable = on(plan.actionable) && planFresh && teleFresh;
-const clock = v => ts(v) === null ? '—' : new Date(v).toLocaleTimeString('lt-LT',{timeZone:'Europe/Vilnius',hour:'2-digit',minute:'2-digit'});
-const date = v => ts(v) === null ? '' : new Date(v).toLocaleDateString('lt-LT',{timeZone:'Europe/Vilnius',month:'2-digit',day:'2-digit'});
+const clock = v => ts(v) === null ? '—' : new Date(v).toLocaleTimeString(p.locale || 'lt-LT',{timeZone:p.timezone,hour:'2-digit',minute:'2-digit'});
+const date = v => ts(v) === null ? '' : new Date(v).toLocaleDateString(p.locale || 'lt-LT',{timeZone:p.timezone,month:'2-digit',day:'2-digit'});
 const row = (label,value) => `<div class="row"><span>${esc(label)}</span><strong>${esc(value)}</strong></div>`;
 const title = (kicker,heading) => `<div class="eyebrow">${esc(kicker)}</div><h3>${esc(heading)}</h3>`;
 const pill = (text,kind='') => `<span class="pill"><span class="dot ${kind}"></span>${esc(text)}</span>`;
@@ -105,7 +83,7 @@ if(variables.kind === 'flow') {
   const ageText=age===null ? 'Laikas nežinomas' : age<60 ? `prieš ${age} s` : `prieš ${Math.floor(age/60)} min`;
   body=title('Momentinė galia','Kur keliauja energija')+`<div class="flow">`+
     node('Saulė',pv,pv===null?'Nėra šviežių duomenų':pv>20?'Gamina':'Negamina','mdi:weather-sunny','#d99a18')+
-    node('Namai',load,load===null?'Nėra šviežių duomenų':'Dabartinis vartojimas','mdi:home-lightning-bolt-outline','#4789e8')+
+    node('Vartojimas',load,load===null?'Nėra šviežių duomenų':'Dabartinis vartojimas','mdi:home-lightning-bolt-outline','#4789e8')+
     node('Baterija',b,b===null?'Nėra šviežių duomenų':b < -20?'← Kraunasi':b>20?'→ Iškrauna':'Ramybė',batteryIcon,'#159b85',batteryMotion)+
     node('Tinklas',g,g===null?'Nėra šviežių duomenų':g>20?'← Imama iš tinklo':g< -20?'→ Atiduodama į tinklą':'Beveik subalansuota','mdi:transmission-tower','#8973cf')+`</div>`+
     `<div class="battery"><div class="top"><span class="muted">Baterijos įkrova</span><span class="battery-value">${fmt(soc,0)} %</span></div><div class="track"><div class="fill" style="width:${soc===null?0:Math.max(0,Math.min(100,soc))}%"></div></div></div>`+
@@ -168,17 +146,18 @@ if(variables.kind === 'profile') {
   const peak=valid?arr.indexOf(Math.max(...arr)):null;
   body=title('Vartojimo įpročiai','Kada namams reikia energijos');
   body+='<div class="numbers">'+figure('Paros vidurkis',fmt(profile.daily_avg),'kWh')+figure('Didžiausia tipinė apkrova',peak===null?'—':String(peak).padStart(2,'0')+':00','')+'</div>';
-  body+='<div class="rows">'+row('Rytojaus prognozė',fmt(s(p.cons_tomorrow))+' kWh')+row('Modeliui naudota istorijos',fmt(profile.usable_days,0)+' d.')+'</div>';
-  body+='<div class="foot muted">Valandų ir savaitės dienų grafikai rodo išmoktus vidurkius, ne šiandienos skaitiklių rodmenis.</div>';
+  body+='<div class="rows">'+row('Rytojaus prognozė',fmt(s(p.cons_tomorrow))+' kWh')+row('Slenkantis langas',fmt(profile.window_days,0)+' parų')+row('Tinkamų parų / valandinių parų',fmt(profile.daily_sample_days,0)+' / '+fmt(profile.hourly_sample_days,0))+'</div>';
+  if(profile.daily_status!=='ok'||profile.hourly_status!=='ok'||profile.statistics_status!=='ok') body+='<div class="callout">Istorija nepilna arba laukiama jos atnaujinimo. Prognozei išlaikomas paskutinis tinkamas profilis.</div>';
+  body+='<div class="foot muted">Grafikai rodo užbaigtų parų vidurkius. Rytojaus prognozė papildomai įvertina savaitės dieną.</div>';
 }
 if(variables.kind === 'payback') {
-  const inv=num(s('input_number.pv_investicija')), grant=num(s('input_number.pv_parama'));
+  const inv=num(s(p.finance?.entities?.investment)), grant=num(s(p.finance?.entities?.grant));
   const valid=inv!==null&&grant!==null&&inv>grant;
-  body=title('Bendras abiejų elektrinių rezultatas','Investicija ir grąža');
-  body+='<div class="numbers">'+figure('Sukaupta nauda',fmt(s('sensor.pv_sutaupyta_viso'),0),'€')+figure('Gryna investicija',valid?fmt(inv-grant,0):'—','€')+'</div>';
+  body=title(p.finance?.title || 'Portfelio rezultatas','Investicija ir grąža');
+  body+='<div class="numbers">'+figure('Sukaupta nauda',fmt(s(p.finance?.entities?.savings),0),'€')+figure('Gryna investicija',valid?fmt(inv-grant,0):'—','€')+'</div>';
   if(!valid) body+='<div class="callout">Investicijos suma turi būti didesnė už atskaitomą paramą. Patikslinkite įvestis žemiau — atsipirkimo procentas ir terminas kol kas nerodomi.</div>';
-  else body+='<div class="rows">'+row('Atsipirko',fmt(s('sensor.pv_atsipirkes_procentais'),1)+' %')+row('Liko padengti',fmt(s('sensor.pv_liko_iki_atsipirkimo'),0)+' €')+'</div>';
-  body+='<div class="foot muted">Abiejuose dashboarduose rodoma ta pati bendra investicija. Grafiko kreivės yra modeliuojamos, o ne sukauptos istorijos faktas.</div>';
+  else body+='<div class="rows">'+row('Atsipirko',fmt(s(p.finance?.entities?.percent),1)+' %')+row('Liko padengti',fmt(s(p.finance?.entities?.remaining),0)+' €')+'</div>';
+  body+='<div class="foot muted">Šio portfelio dashboarduose rodoma bendra investicija. Grafiko kreivės yra modeliuojamos, o ne sukauptos istorijos faktas.</div>';
 }
 return `<style>__CSS__</style><div class="se">${body}</div>`;
 """.replace("__CSS__", PANEL_CSS)
@@ -206,7 +185,7 @@ def button_templates():
               const raw=variables.attribute ? entity?.attributes?.[variables.attribute] : entity?.state;
               const n=raw!==null && raw!==undefined && String(raw).trim()!=='' ? Number(raw) : NaN;
               if(!Number.isFinite(n)) return '—';
-              return new Intl.NumberFormat('lt-LT',{maximumFractionDigits:variables.decimals ?? 1}).format(n)+' '+(variables.unit ?? entity?.attributes?.unit_of_measurement ?? '');
+              return new Intl.NumberFormat(variables.locale || 'lt-LT',{maximumFractionDigits:variables.decimals ?? 1}).format(n)+' '+(variables.unit ?? entity?.attributes?.unit_of_measurement ?? '');
             ]]]""",
             "styles": {
                 "card": [{"padding": "16px"}, {"border-radius": "16px"}, {"box-shadow": "none"}],
@@ -223,7 +202,7 @@ def button_templates():
 def _panel(p, kind):
     keys = ("site_label", "pv", "load", "grid", "battery", "soc", "plan", "telemetry", "executor", "storm", "manual", "manual_soc", "consumption_profile", "cons_tomorrow")
     cfg = {k: p.get(k) for k in keys}
-    cfg.update(EXTRA[p["site_label"]])
+    cfg.update({k: p.get(k) for k in ("horizon", "power", "heartbeat", "heartbeat_max_age", "grid_sign", "battery_sign", "url", "locale", "timezone", "finance")})
     cfg["quality"] = p["analysis"]["quality"]
     return {"type": "custom:button-card", "template": "se_panel", "update_timer": "5s" if kind == "flow" else "15s",
             "variables": {"plant": cfg, "kind": kind}, "grid_options": {"columns": "full", "rows": "auto"}}
@@ -298,16 +277,17 @@ def _chart(card, *, title=None, half=False):
 
 
 def _view(p, title, path, icon, subtitle, sections):
-    e = EXTRA[p["site_label"]]
-    return {"title": title, "path": path, "icon": icon, "type": "sections", "max_columns": 2,
+    e = p
+    return {"title": title, "path": p.get("overview_path", path) if path == "energija" else path, "icon": icon, "type": "sections", "max_columns": 2,
             "dense_section_placement": False,
             "header": {"layout": "start", "badges_position": "bottom", "card": {
                 "type": "markdown", "text_only": True,
                 "content": f"# {p['title']} · {title}\n{subtitle}",
             }},
-            "badges": [{"type": "entity", "entity": p["soc"], "name": "Baterija", "show_name": True, "color": "teal"},
-                       {"type": "entity", "entity": p["pv"], "name": e["other_name"], "show_name": True, "show_state": False,
-                        "icon": "mdi:swap-horizontal", "tap_action": {"action": "navigate", "navigation_path": f"/{e['other_url']}/{path}"}}],
+            "badges": [{"type": "entity", "entity": p["soc"], "name": "Baterija", "show_name": True, "color": "teal"}] + [
+                {"type": "entity", "entity": p["pv"], "name": peer["title"], "show_name": True, "show_state": False,
+                 "icon": "mdi:swap-horizontal", "tap_action": {"action": "navigate", "navigation_path": f"/{peer['url']}/{peer.get('overview_path', 'energija') if path == 'energija' else path}"}}
+                for peer in p.get("navigation", [])],
             "sections": sections}
 
 
@@ -318,7 +298,7 @@ def _history(p):
         "series": [
             {"entity": p["pv"], "name": "Saulė · kW", "yaxis_id": "kw", "color": COLORS["pv"], "type": "area", "opacity": .15,
              "transform": "return x === null ? null : Number(x) / 1000;", "stroke_width": 2, "group_by": {"func": "avg", "duration": "5min"}},
-            {"entity": p["load"], "name": "Namai · kW", "yaxis_id": "kw", "color": COLORS["load"],
+            {"entity": p["load"], "name": "Vartojimas · kW", "yaxis_id": "kw", "color": COLORS["load"],
              "transform": "return x === null ? null : Number(x) / 1000;", "stroke_width": 2, "group_by": {"func": "avg", "duration": "5min"}},
             {"entity": p["soc"], "name": "Baterija · %", "yaxis_id": "soc", "color": COLORS["battery"],
              "stroke_width": 2, "group_by": {"func": "last", "duration": "5min"}},
@@ -328,7 +308,7 @@ def _history(p):
 def _bank_graph(p):
     return _chart({"type": "custom:apexcharts-card", "header": {"show": True, "title": "ESO bankas · uždarytų mėnesių faktas"},
         "graph_span": "1y", "span": {"start": "year", "offset": "+3month"}, "update_interval": "1h",
-        "yaxis": [{"min": 0, "decimals": 0}], "series": [{"entity": EXTRA[p["site_label"]]["bank_official"],
+        "yaxis": [{"min": 0, "decimals": 0}], "series": [{"entity": p["bank_official"],
             "name": "Likutis · kWh", "type": "column", "color": COLORS["battery"], "extend_to": False,
             "data_generator": """const s=entity.attributes.serija || {};
 const now=new Date(), bankStart=(now.getMonth()>=3?now.getFullYear():now.getFullYear()-1)+'-04';
@@ -348,7 +328,7 @@ def _preferences(p):
 
 def build_views(p, legacy):
     """Reuse selected historical cards; own the new layout in one place."""
-    a, t, e = p["analysis"], p["toggles"], EXTRA[p["site_label"]]
+    a, t, e = p["analysis"], p["toggles"], p
     today = a["today"]
     energy = _view(p, "Energija", "energija", "mdi:lightning-bolt", "Dabartinė būsena ir artimiausias planas.", [
         _section(_panel(p, "status"), span=2),
@@ -368,7 +348,7 @@ def build_views(p, legacy):
         _section(_heading("Rankinės parinktys", "mdi:tune"), _entities("Šios elektrinės valdymas", [
             _row(p["storm"], "Audros / ESO rezervas"), _row(p["manual"], "Rankinis iškrovimo valdymas"),
             _row(p["manual_soc"], "Rankinis SOC valdymas")]), visible=t["control"]),
-        _section(_entities("Boileris", [_row(p["boiler"], "Dabartinis sprendimas")]), visible=t["boiler"]),
+        *([_section(_entities("Boileris", [_row(p["boiler"], "Dabartinis sprendimas")]), visible=t["boiler"])] if p.get("boiler_enabled") else []),
     ])
     # These graphs existed before the redesign; preserve metrics and entity IDs.
     analysis = _view(p, "Analizė", "analize", "mdi:chart-box-outline", "Rezultatai, prognozių tikslumas ir įrangos būklė.", [
@@ -386,18 +366,19 @@ def build_views(p, legacy):
             _row(p["shadow"], "Plano ir inverterio atitiktis"), _row(p["core"], "Branduolys"), _row(p["coordinator"], "Koordinatorius"),
             _row(p["plan"], "Galiojantis planas"), _row(p["shadow_plan"], "Kontrolinis planas"), _row(p["shadow_cmd"], "Kontrolinės komandos")]), span=2, visible=t["diagnostics"]),
     ])
-    # Keep the financial input controls and existing model curves together.
-    payback_graph = _chart(legacy["payback_graph"], title="Modeliuojamas atsipirkimas · abi elektrinės")
-    payback_graph["visibility"] = [{"condition": "numeric_state", "entity": "sensor.pv_gryna_investicija", "above": 0}]
-    payback = _view(p, "Atsipirkimas", "atsipirkimas", "mdi:cash-clock", "Bendra Namų ir Eimo investicija, nauda ir prielaidos.", [
-        _section(_panel(p, "payback"), span=2),
-        _section(payback_graph, span=2),
-        _section(_heading("Skaičiavimo prielaidos", "mdi:calculator-variant-outline"), _chart(legacy["payback_inputs"])),
-        _section(_heading("Pagaminta nuo įrengimo", "mdi:solar-panel"),
-                 _metric("sensor.solis_s6_eh3p_pv_total_energy_generation", "Namai", "mdi:home-outline", COLORS["pv"], decimals=0),
-                 _metric("sensor.solis_inverter_1033300254190112_solis_energy_total", "Eimo", "mdi:home-outline", COLORS["pv"], decimals=0),
-                 _note("kWh vertė, pasaugojimo mokestis ir metinė gamyba yra modelio prielaidos. Investicijos ir paramos sumos įrašomos atskirai.")),
-    ])
+    payback = None
+    if p.get("finance"):
+        finance = p["finance"]
+        payback_graph = _chart(legacy["payback_graph"], title="Modeliuojamas atsipirkimas · " + finance["title"])
+        payback_graph["visibility"] = [{"condition": "numeric_state", "entity": finance["entities"]["net"], "above": 0}]
+        payback = _view(p, "Atsipirkimas", "atsipirkimas", "mdi:cash-clock", finance["title"] + ": nauda ir prielaidos.", [
+            _section(_panel(p, "payback"), span=2),
+            _section(payback_graph, span=2),
+            _section(_heading("Skaičiavimo prielaidos", "mdi:calculator-variant-outline"), _chart(legacy["payback_inputs"])),
+            _section(_heading("Pagaminta nuo įrengimo", "mdi:solar-panel"),
+                *[_metric(member["entity"], member["label"], "mdi:home-outline", COLORS["pv"], decimals=0) for member in finance["members"]],
+                _note("Investicijos ir paramos sumos įrašomos atskirai; grafikas naudoja portfelio prielaidas.")),
+        ])
     eso = {"type": "statistics-graph", "title": "ESO tinklo srautas (valandinis)", "chart_type": "bar", "period": "hour", "days_to_show": 7,
            "stat_types": ["change"], "entities": [_row(p["eso_import"], "Iš tinklo"), _row(p["eso_export"], "Į tinklą")]}
     monthly = deepcopy(eso)
@@ -425,4 +406,4 @@ def build_views(p, legacy):
 
     for view in (energy, analysis, consumption):
         graph_visibility(view)
-    return [energy, analysis, payback, consumption]
+    return [view for view in (energy, analysis, payback, consumption) if view is not None]
