@@ -171,7 +171,9 @@ def decide_plan(inputs: PlannerInput, policy: PlannerPolicy) -> EnergyPlan:
         return EnergyPlan(
             mode="self_use", target_soc=target, slot_active=False,
             slot_cutoff_soc=None,
-            inverter_on=(inputs.in_production_hours or guidance.get("inverter_on") is True)
+            # Valid night guidance already checks forecast and measured PV.
+            # The broader legacy daylight window must not undo explicit sleep.
+            inverter_on=(guidance.get("inverter_on") is True)
                 if valid and guidance.get("night_active") is True else
                 (inputs.in_production_hours or soc > policy.night_rest_soc),
             reason=str(guidance.get("reason", "Savas vartojimas ir PV kaupimas")),

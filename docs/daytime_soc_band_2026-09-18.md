@@ -35,30 +35,55 @@ The same policy runs for both plants. Site profiles still supply capacity,
 minimum SOC, preferred band and communication-specific execution margin.
 The hybrid consumption model is unchanged.
 
+## Second defect found during live sunset verification
+
+At 18:21 PV fell to 32 W. The horizon correctly requested night sleep,
+`inverter_on=false`, but the final atomic plan still published `inverter_on=on`.
+The planner ORed the horizon's explicit power decision with a separate,
+broader legacy production-hours flag. The latter still considered it daytime.
+
+The valid night guidance now owns the final power decision. It already checks
+both measured PV and the current forecast; the older daylight window cannot
+reverse an explicit sleep decision. Invalid forecast fallback, storm/manual
+priority, grid-loss protection and the existing hard-floor guard remain.
+
+The new regression failed before the change and passed afterward. It checks
+both plant floors, explicit wake, grid loss and storm override; another test
+checks that invalid night guidance does not shut down production.
+
 ## Deployment and validation
 
-109 offline tests passed, including eight new cases covering the observed
+111 offline tests passed, including ten new cases covering the observed
 failure, both capacity scales, hysteresis, stable cutoff, no-production,
 grid/export-floor safeguards, planner mapping and night sleep priority.
 
 Deployed two files at 18:07:08 Europe/Vilnius. Live SHA-256 values were checked
 before replacement and after writing; both originals were backed up under
 `/homeassistant/.codex-backups/eimo-daytime-band-20260918T150707Z`.
-Only AppDaemon was stopped and started. Home Assistant and the Cloud command
-queue continued running.
+The second fix updated `planner.py` at 18:24:07, backed up under
+`/homeassistant/.codex-backups/eimo-night-priority-20260918T152407Z`.
+Only AppDaemon was stopped and started for each deployment. Home Assistant
+and the Cloud command queue continued running.
 
 At 18:07:13 the live Eimo plan became `feed_in`, slot on, cutoff 94%, with
 planner health `ok`. The native executor submitted the new intent. The
-queue sent its mode command at 18:07:26, then waited for confirmation.
+queue sent its mode command at 18:07:26. The inverter confirmed the mode at
+18:13:35, and the queue sent cutoff 94% at 18:13:38. Cutoff was confirmed at
+18:19:41, followed by slot enable at 18:19:44. Actual write gaps were
+372.209 and 365.983 seconds.
 No direct inverter service calls, shortened command intervals or write
 pings were used. The existing minimum of 360 seconds after each write and
 subsequent register readback still applies; slot parameters precede enable.
 
-Hardware confirmation is still being observed; the plan state alone does
-not establish that all inverter settings have been applied.
+The night transition occurred after slot enable had already been sent.
+At 18:24:21 both atomic plans correctly requested power off and slot off;
+the Eimo queue replaced its pending targets accordingly. The already sent
+command remains tracked until readback, then the current off target is
+reconciled with the same write interval. Hardware confirmation of that final
+sleep state is still being observed; a plan state alone is not confirmation.
 
 ## Rollback
 
-Stop AppDaemon, restore the two files listed in the backup's manifest,
+Stop AppDaemon, restore files from the corresponding backup manifests,
 and start AppDaemon. Do not restore the entire configuration or reset the
 Cloud queue. The normal executor will reconcile the currently valid plan.

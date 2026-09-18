@@ -60,4 +60,25 @@ class DaytimeBand(unittest.TestCase):
         r=plan_dawn(slots,now,47,self.policy,production_on=False,execution_margin_minutes=30)
         self.assertTrue(r['night_active']);self.assertFalse(r['export_now']);self.assertFalse(r['inverter_on'])
 
+    def test_night_sleep_wins_over_legacy_production_window(self):
+        guidance=dict(valid=True,night_active=True,inverter_on=False,
+                      export_now=False,grid_connected=True,reason='Night sleep')
+        for floor in (6,13):
+            inp=PlannerInput(False,False,99,20,True,floor,0,guidance)
+            policy=PlannerPolicy(hard_floor=floor)
+            plan=decide_plan(inp,policy)
+            self.assertEqual(plan.priority,'horizon_night')
+            self.assertFalse(plan.slot_active)
+            self.assertFalse(plan.inverter_on)
+            awake=decide_plan(replace(inp,horizon={**guidance,'inverter_on':True}),policy)
+            self.assertTrue(awake.inverter_on)
+            no_grid=decide_plan(replace(inp,horizon={**guidance,'grid_connected':False}),policy)
+            self.assertTrue(no_grid.inverter_on)
+            self.assertTrue(decide_plan(replace(inp,storm=True),policy).inverter_on)
+
+    def test_invalid_night_guidance_does_not_shut_down_during_production(self):
+        inp=PlannerInput(False,False,99,20,True,6,0,
+                         dict(valid=False,night_active=True,inverter_on=False))
+        self.assertTrue(decide_plan(inp,PlannerPolicy(hard_floor=6)).inverter_on)
+
 if __name__=='__main__':unittest.main()
