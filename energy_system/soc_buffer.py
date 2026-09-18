@@ -36,7 +36,8 @@ def grid_present(now, heartbeat, voltages, frequency, max_age):
 
 def daytime_buffer(guidance, slots, now, soc, policy, *, connected,
                    export_floor=None, already_buffering=False, charge_acceptance_kw=None,
-                   previous_cutoff=None, execution_minutes=5, extra_headroom_soc=0):
+                   previous_cutoff=None, execution_minutes=5, extra_headroom_soc=0,
+                   production_on=False):
     """Keep a short, locally bounded TOU slot available through PV/load dips.
 
 Predict capacity pressure four hours ahead, including PV's share of the grid
@@ -44,6 +45,9 @@ export limit. Below the preferred ceiling protect P10 household demand until
 the next day's credible recharge, plus comfort SOC. A second cloudy evening
 does not veto all useful headroom today. Each new target frees <=0.75 kWh;
 an outstanding target is held stable rather than chasing every SOC increase.
+Above the preferred ceiling, ongoing production is sufficient to restore the
+SOC band. A lack of forecast surplus must not strand a full battery until night.
+The adapter's separate night plan owns export/sleep after production ends.
 """
     result = dict(guidance)
     upper, lower = policy.storage_ceiling, policy.comfort_soc
@@ -54,6 +58,7 @@ an outstanding target is held stable rather than chasing every SOC increase.
                   charge_acceptance_kw=charge_acceptance_kw,
                   taper_headroom_soc=15, extra_headroom_soc=extra_headroom_soc,
                   predictive_buffer_due=False, buffer_required_kwh=0,
+                  buffer_preferred_band_due=False, buffer_near_pv_surplus_kwh=0,
                   buffer_first_pressure_at=None, buffer_execution_minutes=execution_minutes)
     if not connected:
         result.update(export_now=False, solar_export_priority=False,
@@ -93,7 +98,10 @@ an outstanding target is held stable rather than chasing every SOC increase.
                   buffer_protected_soc=ceil(reserve), predictive_buffer_due=early)
     start = soc >= upper + 2
     keep = already_buffering and soc > upper + 0.5
-    if not (early or ((start or keep) and near_surplus >= 0.3)):
+    band_due = (start or keep) and (production_on or near_surplus >= 0.3)
+    result.update(buffer_preferred_band_due=band_due,
+                  buffer_near_pv_surplus_kwh=round(near_surplus, 3))
+    if not (early or band_due):
         return result
     safe_floor = max(reserve if early and soc <= upper+2 else upper,
                      finite(export_floor, policy.hard_floor))
@@ -107,5 +115,5 @@ an outstanding target is held stable rather than chasing every SOC increase.
                   cutoff_soc=floor, reserve_soc=min(result["reserve_soc"], safe_floor),
                   reason=(f"Artėja talpos trūkumas ({needed:.2f} kWh); ankstyvas PV buferis iki {floor:.0f}%"
                           if early and soc < upper+2 else
-                          f"SOC virš pageidaujamos {upper:.0f}% ribos; PV buferio eksportas iki {floor:.0f}%"))
+                          f"Dienos SOC virš pageidaujamos {upper:.0f}% ribos; iškrovimas iki {floor:.0f}%"))
     return result

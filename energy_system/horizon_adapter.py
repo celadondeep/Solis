@@ -231,7 +231,7 @@ def build_horizon_mixin(profile):
                     previous_cutoff=previous.get("cutoff_soc"),
                     execution_minutes=profile.get("HEADROOM_EXECUTION_MINUTES", 5),
                     extra_headroom_soc=profile.get("EXTRA_HEADROOM_SOC", 0),
-                    charge_acceptance_kw=acceptance)
+                    charge_acceptance_kw=acceptance, production_on=production)
                 if result["solar_export_priority"] and not result["export_now"]:
                     result["reason"] = "Dienos PV: namai → leistinas eksportas → baterija; vietos rezervas saugomas"
             result.update(preferred_soc_min=active_policy.comfort_soc,
