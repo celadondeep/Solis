@@ -161,7 +161,8 @@
       "check": "sensor.solis_shadow_check",
       "commands": "sensor.solis_shadow_commands"
     },
-    "TRANSPORT": "modbus"
+    "TRANSPORT": "modbus",
+    "CONSUMPTION_DAILY_SENSOR": "sensor.solis_s6_eh3p_today_energy_consumption"
   },
   "consumption": {
     "KEY": "home",
@@ -212,6 +213,9 @@
       },
       "season": {
         "$ref": "energy.SENSOR.season"
+      },
+      "actual_today": {
+        "$ref": "energy.CONSUMPTION_DAILY_SENSOR"
       }
     },
     "OUTPUT": {
@@ -225,7 +229,9 @@
       "profile": {
         "$ref": "energy.SENSOR.consumption_profile"
       }
-    }
+    },
+    "WEEKDAY_STRENGTH": 0.0,
+    "INTRADAY_GAIN": 0.25
   },
   "power_quality": {
     "key": "home",

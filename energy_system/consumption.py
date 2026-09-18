@@ -10,10 +10,12 @@ from zoneinfo import ZoneInfo
 
 import appdaemon.plugins.hass.hassapi as hass
 
-from energy_system.consumption_math import remaining_profile_ratio
 from energy_system.consumption_rolling import (
     window_bounds, rolling_daily_statistics, recorder_days, rolling_hourly_statistics,
 )
+from energy_system.consumption_forecast import rates_for_day, integrate, intraday_ratio, fresh_daily_value, day_quality
+from energy_system.consumption_accuracy import freeze, score
+from energy_system.horizon import ha_attributes
 
 
 def build_consumption_model(profile):
@@ -24,6 +26,10 @@ def build_consumption_model(profile):
     model_file = profile['MODEL_FILE']
     label = profile['SITE_LABEL']
     window_bounds(datetime.now(tz).date(), window_days)  # Validate before startup.
+    if not 0 <= float(profile.get('WEEKDAY_STRENGTH', 1.0)) <= 1:
+        raise ValueError('WEEKDAY_STRENGTH must be between 0 and 1')
+    if not 0 <= float(profile.get('INTRADAY_GAIN', 0.0)) <= .75:
+        raise ValueError('INTRADAY_GAIN must be between 0 and 0.75')
 
     class ConsumptionModel(hass.Hass):
         def local_now(self):
@@ -34,8 +40,9 @@ def build_consumption_model(profile):
             self.retry_timer = None
             self.recompute_from_history()
             self.run_daily(self.update_model, profile['DAILY_UPDATE_TIME'])
+            self.run_daily(self.update_ha_sensors, '00:00:05')
             self.run_in(self.update_model, profile.get('STARTUP_REFRESH_DELAY', 25))
-            self.run_every(self.update_ha_sensors, 'now+5', 30 * 60)
+            self.run_every(self.update_ha_sensors, 'now+5', 5 * 60)
             self.listen_event(self.manual_update, profile['MANUAL_EVENT'])
             self.log(f'[{label}] Vartojimas: {window_days} užbaigtų parų slenkantis langas')
 
@@ -130,11 +137,17 @@ def build_consumption_model(profile):
             for day, value in totals.items():
                 if isfinite(value) and value > 0:
                     history[day] = dict(history.get(day, {}), date=day, kwh=round(value, 5), source=source)
+                elif value == 0 and source == 'ha_recorder':
+                    # An authoritative zero cannot leave yesterday's stale
+                    # positive fallback in the training set for this date.
+                    history.pop(day, None)
             self.model['history'] = [history[key] for key in sorted(history)]
             self.normalize_model(self.model)
 
         def import_eso_data(self):
             """Optional CSV seed; dated samples still obey the same rolling window."""
+            if not profile.get('ALLOW_GRID_CSV_SEED', False):
+                return
             filename = profile['ESO_CSV_FILE']
             if not os.path.exists(filename):
                 return
@@ -194,7 +207,8 @@ def build_consumption_model(profile):
                 except (KeyError, TypeError, ValueError):
                     pass
             self.recompute_from_history()
-            self.enrich_history_with_weather()
+            if profile.get('ENRICH_WEATHER', False):
+                self.enrich_history_with_weather()
             self.save_model()
             self.update_ha_sensors({})
             # At most one delayed local-recorder retry per daily/startup run.
@@ -203,34 +217,40 @@ def build_consumption_model(profile):
 
         def recompute_from_history(self):
             self.normalize_model(self.model)
-            stats = rolling_daily_statistics(self.model['history'], today=self.local_now().date(),
+            quality = day_quality(self.model.get('hourly_days', {}))
+            history = [r for r in self.model['history'] if r['date'] not in quality]
+            stats = rolling_daily_statistics(history, today=self.local_now().date(),
                                              window_days=window_days, min_days=min_days)
             start, end = stats['window_start'], stats['window_end']
             days = {d: values for d, values in self.model.get('hourly_days', {}).items() if start <= d <= end}
             self.model['hourly_days'] = days
-            hourly = rolling_hourly_statistics(days, excluded_days=stats['anomaly_days'],
+            hourly = rolling_hourly_statistics(days, excluded_days=set(stats['anomaly_days']) | set(quality),
                                                 min_days=min_days, min_total=profile['PROFILE_MIN_TOTAL'])
             learned = hourly.pop('hourly_profile')
             self.model['rolling'] = dict(stats, **hourly)
             if stats['daily_mean_kwh'] is not None:
                 self.model['daily_avg'] = stats['daily_mean_kwh']
                 self.model['weekday_factors'] = stats['weekday_factors']
-                self.model['forecast_method'] = 'rolling_mean_weekday_shrinkage'
+                strength = float(profile.get('WEEKDAY_STRENGTH', 1.0))
+                self.model['forecast_method'] = 'rolling_mean' if strength == 0 else 'rolling_mean_weekday_shrinkage'
+                self.model['daily_latest_sample'] = max(stats['valid_dates'])
             if learned is not None:
                 self.model['hourly_profile'] = learned
                 self.model['hourly_profile_window_end'] = end
-            self.model.update(model_version=3, data_days=len(self.model['history']),
+                self.model['hourly_latest_sample'] = max(d for d in days if d not in hourly['hourly_excluded_days'])
+            self.model.update(model_version=4, data_days=len(self.model['history']),
                               usable_days=stats['daily_sample_days'], anomaly_days=stats['anomaly_days'],
-                              profile_days=hourly['hourly_sample_days'])
+                              profile_days=hourly['hourly_sample_days'], quality_issues=quality)
             return stats['daily_mean_kwh'] is not None
 
         def predict_daily(self, date=None, season=None):
             date = date or self.local_now().date()
             factor = float(self.model['weekday_factors'].get(str(date.weekday()), 1))
+            factor = 1 + (factor-1)*float(profile.get('WEEKDAY_STRENGTH', 1.0))
             # Old seasonal model is retained only until enough dated observations
             # exist. A learned rolling mean already follows seasonal consumption.
             seasonal = 1.0
-            if self.model.get('forecast_method') != 'rolling_mean_weekday_shrinkage':
+            if not str(self.model.get('forecast_method', '')).startswith('rolling_mean'):
                 month = date.month
                 season = season or ('žiema' if month in (12,1,2) else 'pavasaris' if month in (3,4,5) else 'vasara' if month in (6,7,8) else 'ruduo')
                 seasonal = float(self.model['season_factors'].get(season, 1))
@@ -238,11 +258,60 @@ def build_consumption_model(profile):
 
         def predict_remaining_today(self):
             now = self.local_now()
-            ratio = remaining_profile_ratio(self.model['hourly_profile'], now.hour, now.minute, now.second)
-            return round(self.predict_daily() * ratio, 2)
+            rates = rates_for_day(self.model['hourly_profile'], self.predict_daily(), now.date(), profile['TIMEZONE'])
+            first = datetime.combine(now.date(), time.min, tz)
+            end = datetime.combine(now.date()+timedelta(days=1), time.min, tz)
+            expected = integrate(lambda at: rates[at.hour], first, now)
+            record = self.get_state(sensor.get('actual_today', sensor['today_consumption']), attribute='all') or {}
+            actual = fresh_daily_value(record, now, profile.get('ACTUAL_MAX_AGE_SECONDS', 1800))
+            factor = intraday_ratio(actual, expected, profile.get('INTRADAY_GAIN', 0.0))
+            return round(integrate(lambda at: rates[at.hour], now, end)*factor, 2)
 
         def predict_tomorrow(self):
             return self.predict_daily(self.local_now().date() + timedelta(days=1))
+
+        def dated_forecasts(self):
+            now = self.local_now()
+            freshness = {key: self.model.get(key) for key in ('daily_latest_sample', 'hourly_latest_sample')}
+            status = 'ok'
+            try:
+                ages = [(now.date()-datetime.fromisoformat(value).date()).days for value in freshness.values()]
+                if min(ages) < 1 or max(ages) > profile.get('MAX_TRAINING_AGE_DAYS', 7):
+                    status = 'stale'
+                elif max(ages) > 1 or self.model.get('statistics_status') != 'ok':
+                    status = 'cached'
+            except (TypeError, ValueError):
+                status = 'insufficient_data'
+            forecasts = {}
+            for delta in (0, 1):
+                day = now.date()+timedelta(days=delta)
+                total = self.predict_daily(day)
+                forecasts[str(day)] = dict(daily_kwh=total, hourly_kw=rates_for_day(
+                    self.model['hourly_profile'], total, day, profile['TIMEZONE']), **freshness)
+            return forecasts, status
+
+        def accuracy(self, forecasts, status):
+            now = self.local_now()
+            method = 'v4:'+self.model.get('forecast_method', 'bootstrap')+':wd='+str(profile.get('WEEKDAY_STRENGTH', 1.0))
+            ledger = self.model.setdefault('forecast_ledger', {})
+            oldest = str(now.date()-timedelta(days=120))
+            for key in list(ledger):
+                if ledger[key]['target_date'] < oldest:
+                    del ledger[key]
+            # The midnight publication changes forecast dates immediately, but
+            # the ledger waits for today's recorder refresh (normally 00:20).
+            try:
+                refreshed_today = datetime.fromisoformat(self.model.get('statistics_refreshed_at', '')).astimezone(tz).date() == now.date()
+            except (TypeError, ValueError):
+                refreshed_today = False
+            if status in ('ok', 'cached') and refreshed_today:
+                target = now.date()+timedelta(days=1)
+                baseline = float(self.model['daily_avg'])*float(self.model['weekday_factors'].get(str(target.weekday()), 1))
+                if freeze(ledger, now=now, forecast=forecasts[str(target)]['daily_kwh'], baseline=baseline,
+                          method=method, trained_through=self.model['daily_latest_sample']):
+                    self.save_model()
+            return score(ledger, today=now.date(), days=self.model.get('hourly_days', {}),
+                         invalid=self.model.get('quality_issues', {}), method=method)
 
         def enrich_history_with_weather(self):
             if not any('t_mean' not in item for item in self.model['history']):
@@ -265,9 +334,12 @@ def build_consumption_model(profile):
             # data can be used, but old dates cannot silently re-enter the window.
             self.recompute_from_history()
             stats = self.model['rolling']
+            forecasts, status = self.dated_forecasts()
+            accuracy = self.accuracy(forecasts, status)
             common = {'window_days': window_days, 'window_start': stats['window_start'],
                       'window_end': stats['window_end'], 'sample_days': stats['daily_sample_days'],
-                      'quality': stats['daily_status']}
+                      'quality': stats['daily_status'], 'forecast_status': status,
+                      'forecast_method': self.model.get('forecast_method')}
             for entity, value, name in (
                 (output['remaining'], self.predict_remaining_today(), 'likęs suvartojimas šiandien'),
                 (output['tomorrow'], self.predict_tomorrow(), 'rytojaus suvartojimo prognozė'),
@@ -279,14 +351,18 @@ def build_consumption_model(profile):
             attrs.update(friendly_name=f'{label}: vartojimo profilis', icon='mdi:chart-bar',
                          daily_avg=stats['daily_mean_kwh'], data_days=len(self.model['history']),
                          usable_days=stats['daily_sample_days'], profile_days=stats['hourly_sample_days'],
-                         anomaly_count=len(stats['anomaly_days']), model_version=3,
+                         anomaly_count=len(stats['anomaly_days']), model_version=4,
                          method='rolling_mean_filtered', timezone=profile['TIMEZONE'],
                          statistics_status=self.model.get('statistics_status', 'waiting'),
                          statistics_refreshed_at=self.model.get('statistics_refreshed_at'),
                          incomplete_hourly_days=self.model.get('incomplete_hourly_days', []),
                          forecast_today_kwh=self.predict_daily(),
+                         forecast_method=self.model.get('forecast_method'),
+                         forecasts=forecasts, forecast_status=status, accuracy=accuracy,
+                         quality_issues=self.model.get('quality_issues', {}),
+                         intraday_gain=profile.get('INTRADAY_GAIN', 0.0),
                          hourly_forecast_window_end=self.model.get('hourly_profile_window_end'))
             # AppDaemon 4.5.13 drops numeric zero from REST payloads: use text.
-            self.set_state(output['profile'], state=str(stats['hourly_sample_days']), attributes=attrs)
+            self.set_state(output['profile'], state=str(stats['hourly_sample_days']), attributes=ha_attributes(attrs))
 
     return ConsumptionModel

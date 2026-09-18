@@ -40,6 +40,15 @@
       "charge_kw": 3.0,
       "discharge_kw": 3.0,
       "burst_kwh": 0.75
+    },
+    "CONSUMPTION_INTRADAY_GAIN": {
+      "$ref": "consumption.INTRADAY_GAIN"
+    },
+    "CONSUMPTION_ACTUAL_MAX_AGE_SECONDS": {
+      "$ref": "consumption.ACTUAL_MAX_AGE_SECONDS"
+    },
+    "CONSUMPTION_MAX_TRAINING_AGE_DAYS": {
+      "$ref": "consumption.MAX_TRAINING_AGE_DAYS"
     }
   },
   "consumption": {
@@ -64,6 +73,12 @@
     },
     "ROLLING_WINDOW_DAYS": 30,
     "TIMEZONE": "Europe/Vilnius",
-    "DAILY_UPDATE_TIME": "00:20:00"
+    "DAILY_UPDATE_TIME": "00:20:00",
+    "WEEKDAY_STRENGTH": 1.0,
+    "INTRADAY_GAIN": 0.0,
+    "ACTUAL_MAX_AGE_SECONDS": 1800,
+    "MAX_TRAINING_AGE_DAYS": 7,
+    "ALLOW_GRID_CSV_SEED": false,
+    "ENRICH_WEATHER": false
   }
 }

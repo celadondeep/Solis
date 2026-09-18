@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from dataclasses import replace
 from energy_system.dawn import plan_dawn,day_dispatch
 from energy_system.soc_buffer import preferred_policy, daytime_buffer, grid_present
+from energy_system.consumption_forecast import forecast_reader, intraday_ratio, fresh_daily_value
 
 from energy_system.horizon import (
     VERSION, HorizonPolicy, clamp, finite, forecast_slots, plan_horizon, stamp, ha_attributes,
@@ -25,6 +26,10 @@ def build_horizon_mixin(profile):
 
     class HorizonMixin:
         def _consumed_today(self, now):
+            daily_entity = profile.get('CONSUMPTION_DAILY_SENSOR')
+            if daily_entity:
+                return fresh_daily_value(self._read_state_record(daily_entity), now,
+                                         profile.get('CONSUMPTION_ACTUAL_MAX_AGE_SECONDS', 1800))
             entity = sensors["consumption_today"]
             current = self.get_optional_sensor_float(entity)
             if not profile.get("CONSUMPTION_TODAY_IS_TOTAL", False):
@@ -133,23 +138,9 @@ def build_horizon_mixin(profile):
                     raise ValueError("forecast date mismatch")
                 records.extend(rows)
             consumption_record = self._read_state_record(sensors["consumption_profile"])
-            attrs = consumption_record.get("attributes") or {}
-            hourly = attrs.get("hourly_kwh")
-            if not isinstance(hourly, list) or len(hourly) != 24:
-                raise ValueError("missing hourly household profile")
-            hourly = [finite(v) for v in hourly]
-            if any(v is None or v < 0 for v in hourly) or sum(hourly) < 1:
-                raise ValueError("invalid household profile")
-            if (stamp(now) - stamp(consumption_record.get("last_updated"))).total_seconds() > 48 * 3600:
-                raise ValueError("stale household profile")
             tomorrow = self.get_sensor_float(profile["CONSUMPTION_TOMORROW_SENSOR"], default=-1)
-            if finite(tomorrow) is None or tomorrow <= 0:
-                raise ValueError("missing tomorrow consumption")
-            today_total = sum(hourly)
-
-            def load_at(local):
-                scale = 1.0 if local.date() == now.date() else tomorrow / today_total
-                return hourly[local.hour] * scale
+            load_at = forecast_reader(consumption_record, now, tomorrow,
+                                      profile.get('CONSUMPTION_MAX_TRAINING_AGE_DAYS', 7))
 
             end = (now + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
             initial, expected_pv, expected_load = forecast_slots(
@@ -166,11 +157,10 @@ def build_horizon_mixin(profile):
                 grid = self.get_optional_float("grid_power")
                 if soc is not None and soc >= 93 and grid is not None and abs(grid) >= policy.export_kw * 900:
                     pv_ratio = max(1.0, pv_ratio)
-            if consumption_actual is not None and consumption_actual >= 0 and expected_load >= 2.0:
-                weight = min(0.75, expected_load / 5.0 * 0.75)
-                load_ratio = clamp(1 + (consumption_actual / expected_load - 1) * weight, 0.70, 1.60)
-            # A single unusual day weakly influences tomorrow, never replaces learned data.
-            tomorrow_ratio = clamp(1 + (load_ratio - 1) * 0.25, 0.9, 1.15)
+            load_ratio = intraday_ratio(consumption_actual, expected_load,
+                                        profile.get('CONSUMPTION_INTRADAY_GAIN', 0.0))
+            # Tomorrow retains its independently learned daily forecast.
+            tomorrow_ratio = 1.0
             slots, _, _ = forecast_slots(
                 records, now, end, load_at, self.hourly_factor,
                 today_ratio=pv_ratio, load_ratio=load_ratio,
@@ -179,7 +169,7 @@ def build_horizon_mixin(profile):
             # Short-lived measured demand correction; do not project a kettle
             # spike over the whole night or count sleeping grid loads as DC drain.
             load_now = self.get_optional_float("house_load")
-            if load_now is not None and load_now >= 0:
+            if connected and load_now is not None and load_now >= 0:
                 adjusted = []
                 for s in slots:
                     lead = (stamp(s.start)-stamp(now)).total_seconds()/3600

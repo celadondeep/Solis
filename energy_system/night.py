@@ -1,8 +1,10 @@
 """Nakties ekonomikos ir ryto/vakaro SOC planavimo periferija."""
 
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from energy_system.planner import target_soc_for_room
+from energy_system.consumption_forecast import forecast_reader, integrate
 
 
 def build_night_mixin(profile):
@@ -28,32 +30,19 @@ def build_night_mixin(profile):
             lango dydžiui: kiek baterijos iškraus PATYS NAMAI iki ryto gamybos —
             tiek mažiau reikia eksportuoti 1 kW slotu, tad langas startuoja vėliau
             ir baterija dugne pastovi kuo trumpiau."""
-            now = datetime.now().astimezone()
+            now = datetime.now(ZoneInfo(profile.get('TIMEZONE', 'Europe/Vilnius')))
             if not target_dt or target_dt <= now:
                 return 0.0
-            prof = self.get_state(SENSOR["consumption_profile"],
-                                  attribute="hourly_kwh")
-            daily = self.get_daily_consumption()
-
-            def kwh_hour(h):
-                try:
-                    if prof and len(prof) == 24:
-                        return float(prof[h])
-                except (TypeError, ValueError, IndexError):
-                    pass
-                return daily / 24.0
-
-            total = 0.0
-            t = now
-            while t < target_dt:
-                nxt = min(target_dt,
-                          (t + timedelta(hours=1)).replace(minute=0, second=0,
-                                                            microsecond=0))
-                frac = (nxt - t).total_seconds() / 3600.0
-                total += kwh_hour(t.hour) * frac
-                t = nxt
-            hours = (target_dt - now).total_seconds() / 3600.0
-            return round(total + INVERTER_SELF_KW * hours, 2)
+            # get_daily_consumption already includes inverter standby power.
+            # Remove it before adding it once to the physical hourly integral.
+            daily = max(0, self.get_daily_consumption()-INVERTER_SELF_KW*24)
+            try:
+                record = self.get_state(SENSOR['consumption_profile'], attribute='all') or {}
+                load_at = forecast_reader(record, now, daily,
+                    profile.get('CONSUMPTION_MAX_TRAINING_AGE_DAYS', 7))
+                return round(integrate(lambda at: load_at(at)+INVERTER_SELF_KW, now, target_dt), 2)
+            except (KeyError, TypeError, ValueError):
+                return round(integrate(lambda at: daily/24+INVERTER_SELF_KW, now, target_dt), 2)
 
 
         def publish_night_economics(self):

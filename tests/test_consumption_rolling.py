@@ -92,6 +92,11 @@ class RollingMath(unittest.TestCase):
         days,_=recorder_days(rows,today=TODAY)
         self.assertFalse(days)
 
+    def test_malformed_duplicate_does_not_leave_valid_hour(self):
+        rows=rows_for(TODAY-timedelta(days=1));rows.append(dict(rows[0],change=None))
+        days,_=recorder_days(rows,today=TODAY)
+        self.assertFalse(days)
+
     def test_dst_days_conserve_energy_and_hour_counts(self):
         for day,hours in [(date(2026,3,29),23),(date(2026,10,25),25)]:
             days,_=recorder_days(rows_for(day),today=day+timedelta(days=1))
@@ -175,6 +180,46 @@ class AppRecovery(unittest.TestCase):
         self.app.model['bad_value']=float('nan');self.app.save_model()
         self.assertEqual(path.read_text(),old)
         self.assertFalse(Path(str(path)+'.tmp').exists())
+
+    def test_authoritative_zero_removes_stale_daily_fallback(self):
+        day=str(TODAY-timedelta(days=1))
+        self.app.merge_days({day:0},'ha_recorder')
+        self.assertNotIn(day,{r['date'] for r in self.app.model['history']})
+
+    def test_dated_forecast_and_ledger_survive_restart_and_are_scored(self):
+        rows=sum((rows_for(TODAY-timedelta(days=i),.5) for i in range(1,31)),[])
+        self.app.call_service=lambda *a,**kw:self.response(rows)
+        self.app.update_model({})
+        data=self.published[self.profile['OUTPUT']['profile']]['attributes']
+        self.assertEqual(data['model_version'],4)
+        self.assertEqual(int(data['accuracy']['sample_days']),0)
+        ledger=copy.deepcopy(self.app.model['forecast_ledger'])
+        self.app.model=self.app.load_model()
+        self.assertEqual(self.app.model['forecast_ledger'],ledger)
+        self.app.local_now=lambda:datetime(2026,9,19,12,tzinfo=TZ)
+        rows=sum((rows_for(date(2026,9,19)-timedelta(days=i),1) for i in range(1,31)),[])
+        self.app.update_model({})
+        data=self.published[self.profile['OUTPUT']['profile']]['attributes']
+        self.assertEqual(data['accuracy']['sample_days'],1)
+        self.assertEqual(data['accuracy']['mae_kwh'],12)
+        for key in ledger:self.assertEqual(self.app.model['forecast_ledger'][key],ledger[key])
+
+    def test_midnight_publishes_new_dates_without_capturing_old_training(self):
+        rows=sum((rows_for(TODAY-timedelta(days=i),.5) for i in range(1,31)),[])
+        self.app.call_service=lambda *a,**kw:self.response(rows)
+        self.app.update_model({});before=copy.deepcopy(self.app.model['forecast_ledger'])
+        self.app.local_now=lambda:datetime(2026,9,18,0,0,5,tzinfo=TZ)
+        self.app.call_service=lambda *a,**kw:self.fail('Publication must not query recorder')
+        self.app.update_ha_sensors({})
+        data=self.published[self.profile['OUTPUT']['profile']]['attributes']
+        self.assertEqual(set(data['forecasts']),{'2026-09-18','2026-09-19'})
+        self.assertEqual(self.app.model['forecast_ledger'],before)
+
+    def test_rest_attributes_preserve_zero_counts_and_unknown_errors(self):
+        self.app.recompute_from_history();self.app.update_ha_sensors({})
+        attrs=self.published[self.profile['OUTPUT']['profile']]['attributes']
+        self.assertEqual(attrs['accuracy']['sample_days'],'0')
+        self.assertEqual(attrs['accuracy']['mae_kwh'],'unknown')
 
 
 if __name__=='__main__':unittest.main()

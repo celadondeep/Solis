@@ -143,12 +143,16 @@ if(variables.kind === 'quality') {
 if(variables.kind === 'profile') {
   const profile=a(p.consumption_profile), arr=profile.hourly_kwh;
   const valid=Array.isArray(arr)&&arr.length===24&&arr.every(v=>num(v)!==null);
-  const peak=valid?arr.indexOf(Math.max(...arr)):null;
+  const peak=valid?arr.map(num).indexOf(Math.max(...arr.map(num))):null;
   body=title('Vartojimo įpročiai','Kada namams reikia energijos');
   body+='<div class="numbers">'+figure('Paros vidurkis',fmt(profile.daily_avg),'kWh')+figure('Didžiausia tipinė apkrova',peak===null?'—':String(peak).padStart(2,'0')+':00','')+'</div>';
   body+='<div class="rows">'+row('Rytojaus prognozė',fmt(s(p.cons_tomorrow))+' kWh')+row('Slenkantis langas',fmt(profile.window_days,0)+' parų')+row('Tinkamų parų / valandinių parų',fmt(profile.daily_sample_days,0)+' / '+fmt(profile.hourly_sample_days,0))+'</div>';
   if(profile.daily_status!=='ok'||profile.hourly_status!=='ok'||profile.statistics_status!=='ok') body+='<div class="callout">Istorija nepilna arba laukiama jos atnaujinimo. Prognozei išlaikomas paskutinis tinkamas profilis.</div>';
-  body+='<div class="foot muted">Grafikai rodo užbaigtų parų vidurkius. Rytojaus prognozė papildomai įvertina savaitės dieną.</div>';
+  const accuracy=profile.accuracy||{}, samples=num(accuracy.sample_days)||0;
+  body+='<div class="rows">'+row('Vidutinė prognozės klaida',samples>0?fmt(accuracy.mae_kwh,2)+' kWh/parą':'Kaupiami rezultatai')+row('Patikrintų prognozių',fmt(samples,0))+'</div>';
+  const rejected=Object.keys(profile.quality_issues||{}).length;
+  if(rejected) body+=`<div class="callout">Matavimų patikimumo nepakako ${fmt(rejected,0)} paroms. Jos į mokymą neįtrauktos.</div>`;
+  body+='<div class="foot muted">Grafikai rodo užbaigtų parų vidurkius. '+(profile.forecast_method==='rolling_mean_weekday_shrinkage'?'Prognozė papildomai įvertina savaitės dieną. ':'Prognozė paremta slenkančiu paros vidurkiu. ')+(samples>0&&samples<14?'Tikslumo rezultatas dar preliminarus. ':'')+'Klaida vertinama pagal iš anksto išsaugotas prognozes.</div>';
 }
 if(variables.kind === 'payback') {
   const inv=num(s(p.finance?.entities?.investment)), grant=num(s(p.finance?.entities?.grant));

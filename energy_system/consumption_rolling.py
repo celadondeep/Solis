@@ -83,6 +83,7 @@ def recorder_days(rows, *, today, window_days=30, timezone_name='Europe/Vilnius'
     tz = ZoneInfo(timezone_name)
     points, invalid = {}, set()
     for row in rows:
+        stamp = None
         try:
             stamp = _datetime(row['start'])
             if not start <= stamp.astimezone(tz).date() < end:
@@ -96,6 +97,8 @@ def recorder_days(rows, *, today, window_days=30, timezone_name='Europe/Vilnius'
                 invalid.add(stamp)
             points[stamp] = value
         except (KeyError, TypeError, ValueError, OverflowError):
+            if stamp is not None:
+                invalid.add(stamp)
             continue
     complete, incomplete = {}, []
     day = start

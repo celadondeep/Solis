@@ -576,7 +576,15 @@ def _profile_markdown(p: Dict[str, Any]) -> str:
         f"· parų **{{{{ state_attr('{entity}','daily_sample_days') }}}}** "
         f"· pilnų valandinių parų **{{{{ state_attr('{entity}','hourly_sample_days') }}}}** "
         f"· atskirtų šuolių **{{{{ state_attr('{entity}','anomaly_count') | default(0, true) }}}}**. "
-        "Nepilna šiandiena ir trūkstamos valandos į vidurkį neįtraukiamos."
+        "Nepilna šiandiena ir trūkstamos valandos į vidurkį neįtraukiamos.\n\n"
+        f"{{% set a = state_attr('{entity}', 'accuracy') or {{}} %}}"
+        "{% set n = a.get('sample_days', 0) | int(0) %}{% if n > 0 %}"
+        "Rytojaus prognozės vidutinė klaida: **{{ a.mae_kwh }} kWh/parą** "
+        "({{ a.wape_percent }} %; {{ n }} patikrintų parų). "
+        "{% if n < 14 %}Rezultatas dar preliminarus.{% endif %}"
+        "{% else %}Prognozės tikslumas: kaupiami iš anksto išsaugotų prognozių rezultatai.{% endif %}\n\n"
+        f"{{% set q = state_attr('{entity}', 'quality_issues') or {{}} %}}"
+        "{% if q %}Matavimų patikimumo nepakako {{ q | length }} paroms; jos į mokymą neįtrauktos.{% endif %}"
     )
 
 
