@@ -78,9 +78,39 @@ subsequent register readback still applies; slot parameters precede enable.
 The night transition occurred after slot enable had already been sent.
 At 18:24:21 both atomic plans correctly requested power off and slot off;
 the Eimo queue replaced its pending targets accordingly. The already sent
-command remains tracked until readback, then the current off target is
-reconciled with the same write interval. Hardware confirmation of that final
-sleep state is still being observed; a plan state alone is not confirmation.
+command stayed tracked until readback, then the current off target was
+reconciled with the same write interval.
+
+Final native register confirmation (all times Europe/Vilnius):
+
+| Command | Write completed | Register confirmation |
+| --- | --- | --- |
+| Feed-In Priority / TOU | 18:07:26 | 18:13:35 |
+| Discharge cutoff 94% | 18:13:38 | 18:19:41 |
+| Discharge slot on | 18:19:44 | 18:25:48 |
+| Discharge slot off, after night transition | 18:25:54 | 18:32:09 |
+| Inverter off | 18:32:28 | 18:38:32 |
+
+Write-completion gaps were 372.209, 365.983, 369.674 and 394.460 seconds.
+Discharge time was already 00:00–23:59, so no redundant time write was needed.
+Telemetry recorded about 1.285 kW of battery discharge, then 0 W after sleep.
+At 18:39 the Eimo queue was idle, slot off, inverter off and executor health
+`ok`; Cloud health remained healthy. Home's local executor also confirmed
+slot off, inverter off and health `ok`. No direct override or queue reset
+was used to obtain these results.
+
+Solis code commits: `dada4ff7a5942e7abf91cd2c419c8074734861cf` and
+`53b85195b3ce30b1066f13e1b242951518a3a9b8`.
+HA configuration commits: `4bc73242310e32556abbb8e554df1d283b2d019d` and
+`6dd50137a94e1ec20a7c364f53932c80b5d14aa0`.
+The shared planner's GitHub Actions run
+[35362333046](https://github.com/celadondeep/Solis/actions/runs/35362333046)
+passed. HA's separate control workflow does not trigger on AppDaemon paths;
+it was not reported as a new passing run for this patch.
+
+This verifies the incident and the sunset transition. It is not a guarantee
+against future upstream Cloud outages; the existing monitoring, backoff and
+local discharge cutoff remain responsible for those conditions.
 
 ## Rollback
 
