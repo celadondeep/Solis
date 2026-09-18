@@ -40,7 +40,8 @@ def build_night_mixin(profile):
                 record = self.get_state(SENSOR['consumption_profile'], attribute='all') or {}
                 load_at = forecast_reader(record, now, daily,
                     profile.get('CONSUMPTION_MAX_TRAINING_AGE_DAYS', 7))
-                return round(integrate(lambda at: load_at(at)+INVERTER_SELF_KW, now, target_dt), 2)
+                hours = (target_dt.astimezone(ZoneInfo('UTC'))-now.astimezone(ZoneInfo('UTC'))).total_seconds()/3600
+                return round(integrate(load_at, now, target_dt)+INVERTER_SELF_KW*hours, 2)
             except (KeyError, TypeError, ValueError):
                 return round(integrate(lambda at: daily/24+INVERTER_SELF_KW, now, target_dt), 2)
 

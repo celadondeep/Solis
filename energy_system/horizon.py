@@ -7,6 +7,7 @@ Only demonstrably useful pre-export is permitted, in bounded increments.
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from math import ceil, isfinite
+from energy_system.consumption_forecast import integrate
 
 VERSION = "4.4-command-recovery"
 
@@ -136,7 +137,7 @@ four hours; it never changes the next day's independent forecast.
         if local.date() == local_today and start < utc_now:
             duration = max(0.0, min(0.5, (utc_now - start).total_seconds() / 3600))
             expected_today += pv * factor * duration
-            elapsed_load += hourly_load(local) * duration
+            elapsed_load += integrate(hourly_load, local, (start+timedelta(hours=duration)).astimezone(now.tzinfo))
 
     slots, cursor = [], utc_now
     for start, (pv, low, local) in sorted(by_start.items()):
@@ -151,7 +152,7 @@ four hours; it never changes the next day's independent forecast.
         same_day = local.date() == local_today
         bias = 1 + (today_ratio - 1) * max(0.0, 1 - lead / 4) if same_day else 1.0
         demand_bias = load_ratio if same_day else tomorrow_load_ratio
-        load = hourly_load(local) * demand_bias + self_kw
+        load = integrate(hourly_load, left.astimezone(now.tzinfo), right.astimezone(now.tzinfo))/dt * demand_bias + self_kw
         if finite(load) is None or load < 0:
             raise ValueError("invalid load")
         slots.append(Slot(left, dt, pv * bias, low * bias, load))

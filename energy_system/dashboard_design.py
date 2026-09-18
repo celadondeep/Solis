@@ -144,15 +144,25 @@ if(variables.kind === 'profile') {
   const profile=a(p.consumption_profile), arr=profile.hourly_kwh;
   const valid=Array.isArray(arr)&&arr.length===24&&arr.every(v=>num(v)!==null);
   const peak=valid?arr.map(num).indexOf(Math.max(...arr.map(num))):null;
-  body=title('Vartojimo įpročiai','Kada namams reikia energijos');
+  body=title('Hibridinė vartojimo prognozė','Istorija ir patikimi nauji matavimai');
   body+='<div class="numbers">'+figure('Paros vidurkis',fmt(profile.daily_avg),'kWh')+figure('Didžiausia tipinė apkrova',peak===null?'—':String(peak).padStart(2,'0')+':00','')+'</div>';
   body+='<div class="rows">'+row('Rytojaus prognozė',fmt(s(p.cons_tomorrow))+' kWh')+row('Slenkantis langas',fmt(profile.window_days,0)+' parų')+row('Tinkamų parų / valandinių parų',fmt(profile.daily_sample_days,0)+' / '+fmt(profile.hourly_sample_days,0))+'</div>';
+  const hybrid=profile.hybrid||{}, projection=hybrid.projection||{}, interval=profile.forecast_interval||{};
+  const modes={active:'Veikia trumpalaikė korekcija',warming_up:'Kaupiami nauji matavimai',stale_source:'Istorinis profilis · matavimai pasenę',gap_in_samples:'Istorinis profilis · matavimų tarpas',invalid_timestamp:'Istorinis profilis · nėra patikimos matavimo datos',invalid_power:'Istorinis profilis · nėra galios matavimo',unpaired_source:'Istorinis profilis · nesutampa matavimų laikas',inverter_off_or_unknown:'Istorinis profilis · inverteris išjungtas arba nepasiekiamas',appliance_plan_priority:'Taikomi atskirų vartotojų planai'};
+  modes.validation_pending='Tikrinama trumpalaikės korekcijos nauda';
+  modes.validation_rejected='Bazinis modelis tiksliau prognozuoja';
+  body+='<div class="rows">'+row('Modelio būsena',modes[projection.status]||'Istorinis profilis')+row('Trumpalaikė galios korekcija',fmt(projection.power_delta_kw,2)+' kW')+'</div>';
+  if(num(interval.lower_kwh)!==null&&num(interval.upper_kwh)!==null) body+='<div class="callout">Rytojaus orientacinis intervalas: '+fmt(interval.lower_kwh)+'–'+fmt(interval.upper_kwh)+' kWh. Intervalo patikimumas dar tikrinamas pagal naujas prognozes.</div>';
+  if((num(hybrid.active_appliances)||0)>0) body+='<div class="rows">'+row('Atskirų vartotojų planai',fmt(hybrid.active_appliances,0))+'</div>';
   if(profile.daily_status!=='ok'||profile.hourly_status!=='ok'||profile.statistics_status!=='ok') body+='<div class="callout">Istorija nepilna arba laukiama jos atnaujinimo. Prognozei išlaikomas paskutinis tinkamas profilis.</div>';
   const accuracy=profile.accuracy||{}, samples=num(accuracy.sample_days)||0;
   body+='<div class="rows">'+row('Vidutinė prognozės klaida',samples>0?fmt(accuracy.mae_kwh,2)+' kWh/parą':'Kaupiami rezultatai')+row('Patikrintų prognozių',fmt(samples,0))+'</div>';
+  if((num(accuracy.interval_sample_days)||0)>0) body+='<div class="rows">'+row('Prognozės intervalo aprėptis',fmt(accuracy.interval_coverage_percent,0)+' %')+'</div>';
+  const short=hybrid.accuracy||{};
+  body+='<div class="rows">'+row('Valandos prognozės klaida',(num(short.sample_hours)||0)>0?fmt(short.applied_mae_kwh,3)+' kWh':'Kaupiami rezultatai')+row('Patikrintų valandų',fmt(short.sample_hours,0))+'</div>';
   const rejected=Object.keys(profile.quality_issues||{}).length;
   if(rejected) body+=`<div class="callout">Matavimų patikimumo nepakako ${fmt(rejected,0)} paroms. Jos į mokymą neįtrauktos.</div>`;
-  body+='<div class="foot muted">Grafikai rodo užbaigtų parų vidurkius. '+(profile.forecast_method==='rolling_mean_weekday_shrinkage'?'Prognozė papildomai įvertina savaitės dieną. ':'Prognozė paremta slenkančiu paros vidurkiu. ')+(samples>0&&samples<14?'Tikslumo rezultatas dar preliminarus. ':'')+'Klaida vertinama pagal iš anksto išsaugotas prognozes.</div>';
+  body+='<div class="foot muted">Grafikai rodo užbaigtų parų vidurkius. Trumpalaikė korekcija palaipsniui išnyksta per valandą. '+(profile.forecast_method==='rolling_mean_weekday_shrinkage'?'Prognozė papildomai įvertina savaitės dieną. ':'')+(samples>0&&samples<14?'Tikslumo rezultatas dar preliminarus. ':'')+'Klaida vertinama pagal iš anksto išsaugotas prognozes.</div>';
 }
 if(variables.kind === 'payback') {
   const inv=num(s(p.finance?.entities?.investment)), grant=num(s(p.finance?.entities?.grant));

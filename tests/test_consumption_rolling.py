@@ -191,7 +191,7 @@ class AppRecovery(unittest.TestCase):
         self.app.call_service=lambda *a,**kw:self.response(rows)
         self.app.update_model({})
         data=self.published[self.profile['OUTPUT']['profile']]['attributes']
-        self.assertEqual(data['model_version'],4)
+        self.assertEqual(data['model_version'],5)
         self.assertEqual(int(data['accuracy']['sample_days']),0)
         ledger=copy.deepcopy(self.app.model['forecast_ledger'])
         self.app.model=self.app.load_model()

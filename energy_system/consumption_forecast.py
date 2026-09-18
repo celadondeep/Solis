@@ -24,11 +24,17 @@ def instant(value):
 
 
 def integrate(load_at, start, end):
-    """Walk physical hours in UTC, including both copies of a repeated hour."""
+    """Walk physical hours and optional forecast breakpoints in UTC."""
     cursor, end = instant(start), instant(end)
+    boundaries = sorted({instant(v) for v in getattr(load_at, 'boundaries', ()) if cursor < instant(v) < end})
+    index = 0
     total = 0.0
     while cursor < end:
         nxt = min(end, (cursor + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0))
+        while index < len(boundaries) and boundaries[index] <= cursor:
+            index += 1
+        if index < len(boundaries):
+            nxt = min(nxt, boundaries[index])
         value = number(load_at(cursor.astimezone(start.tzinfo)))
         if value is None or value < 0:
             raise ValueError('Invalid household rate')
@@ -58,7 +64,7 @@ def forecast_reader(record, now, tomorrow=None, max_training_age_days=7):
     if not -300 <= age <= 48*3600:
         raise ValueError('Stale household publication')
     dates = [now.date(), now.date()+timedelta(days=1)]
-    if attrs.get('model_version', 0) >= 4:
+    if (number(attrs.get('model_version')) or 0) >= 4:
         if attrs.get('forecast_status') not in ('ok', 'cached'):
             raise ValueError('Household model is not ready')
         forecasts = attrs.get('forecasts') or {}
@@ -94,6 +100,9 @@ def forecast_reader(record, now, tomorrow=None, max_training_age_days=7):
             return values[str(local.date())][local.hour]
         except KeyError as exc:
             raise ValueError('Household forecast date outside horizon') from exc
+    if (number(attrs.get('model_version')) or 0) >= 5:
+        from energy_system.consumption_hybrid import hybrid_reader
+        return hybrid_reader(load_at, now, attrs.get('hybrid') or {})
     return load_at
 
 

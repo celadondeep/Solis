@@ -157,7 +157,8 @@ def build_horizon_mixin(profile):
                 grid = self.get_optional_float("grid_power")
                 if soc is not None and soc >= 93 and grid is not None and abs(grid) >= policy.export_kw * 900:
                     pv_ratio = max(1.0, pv_ratio)
-            load_ratio = intraday_ratio(consumption_actual, expected_load,
+            hybrid = getattr(load_at, 'hybrid', False)
+            load_ratio = 1.0 if hybrid else intraday_ratio(consumption_actual, expected_load,
                                         profile.get('CONSUMPTION_INTRADAY_GAIN', 0.0))
             # Tomorrow retains its independently learned daily forecast.
             tomorrow_ratio = 1.0
@@ -169,7 +170,7 @@ def build_horizon_mixin(profile):
             # Short-lived measured demand correction; do not project a kettle
             # spike over the whole night or count sleeping grid loads as DC drain.
             load_now = self.get_optional_float("house_load")
-            if connected and load_now is not None and load_now >= 0:
+            if not hybrid and connected and load_now is not None and load_now >= 0:
                 adjusted = []
                 for s in slots:
                     lead = (stamp(s.start)-stamp(now)).total_seconds()/3600
@@ -245,6 +246,9 @@ def build_horizon_mixin(profile):
                           model_discharge_kw=active_policy.discharge_kw,
                           pv_adjustment=round(pv_ratio, 3),
                           consumption_adjustment=round(load_ratio, 3),
+                          consumption_model='hybrid_v5' if hybrid else 'legacy',
+                          consumption_nowcast_active=getattr(load_at, 'active_projection', False),
+                          consumption_appliance_plans=getattr(load_at, 'appliance_count', 0),
                           consumption_tomorrow_adjustment=round(tomorrow_ratio, 3),
                           expected_pv_so_far_kwh=round(expected_pv, 2),
                           actual_pv_so_far_kwh=pv_actual,

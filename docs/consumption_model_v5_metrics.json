@@ -1,0 +1,58 @@
+{
+  "home": {
+    "next_day_recent_mae": 2.168,
+    "next_day_recent_n": 14,
+    "interval_prequential": {
+      "n": 52,
+      "coverage_percent": 69.23,
+      "mean_width_kwh": 7.55
+    },
+    "interval_recent": {
+      "n": 14,
+      "coverage_percent": 78.57,
+      "mean_width_kwh": 8.79
+    },
+    "nowcast_proxy": {
+      "n": 305,
+      "baseline_hour_mae": 0.3522,
+      "hybrid_hour_mae": 0.3795
+    },
+    "tomorrow_interval": {
+      "lower_kwh": 13.88,
+      "upper_kwh": 21.81,
+      "nominal_percent": 80,
+      "source": "causal_replay_residuals",
+      "sample_days": 26,
+      "status": "historical_estimate",
+      "live_coverage_percent": null
+    }
+  },
+  "eimo": {
+    "next_day_recent_mae": 1.615,
+    "next_day_recent_n": 13,
+    "interval_prequential": {
+      "n": 38,
+      "coverage_percent": 84.21,
+      "mean_width_kwh": 11.451
+    },
+    "interval_recent": {
+      "n": 13,
+      "coverage_percent": 100,
+      "mean_width_kwh": 8.643
+    },
+    "nowcast_proxy": {
+      "n": 152,
+      "baseline_hour_mae": 0.1764,
+      "hybrid_hour_mae": 0.1763
+    },
+    "tomorrow_interval": {
+      "lower_kwh": 6.97,
+      "upper_kwh": 13.65,
+      "nominal_percent": 80,
+      "source": "causal_replay_residuals",
+      "sample_days": 26,
+      "status": "historical_estimate",
+      "live_coverage_percent": null
+    }
+  }
+}

@@ -79,6 +79,13 @@
     "ACTUAL_MAX_AGE_SECONDS": 1800,
     "MAX_TRAINING_AGE_DAYS": 7,
     "ALLOW_GRID_CSV_SEED": false,
-    "ENRICH_WEATHER": false
+    "ENRICH_WEATHER": false,
+    "NOWCAST_GAIN": 0.35,
+    "APPLIANCES": [],
+    "SENSOR": {
+      "inverter_power": {
+        "$ref": "energy.SENSOR.power_state"
+      }
+    }
   }
 }
