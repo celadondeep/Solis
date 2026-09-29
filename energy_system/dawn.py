@@ -188,7 +188,6 @@ The export ceiling is shared with PV and never added on top of PV export.
     previous_evening_target = finite(prior.get('evening_target_soc')) if same_night else None
     if same_night and previous_evening_target is not None:
         evening_target = max(budget['target_soc'], previous_evening_target)
-        split_enabled = prior.get('night_split_enabled') in (True, 'on', 'true')
     else:
         evening_target = max(budget['target_soc'], ceil(soc-evening_kwh/policy.kwh_per_soc))
     evening_done = bool(same_night and prior.get('evening_done') in (True, 'on', 'true'))

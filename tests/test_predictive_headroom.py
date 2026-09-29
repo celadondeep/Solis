@@ -172,6 +172,23 @@ class PredictiveHeadroomTests(unittest.TestCase):
         self.assertGreater(result['morning_kwh'],0)
         self.assertNotEqual(result['discharge_phase'],'evening')
 
+    def test_replan_disables_split_when_remaining_share_falls_below_one_kwh(self):
+        now=self.now.replace(hour=19)
+        slots=[]
+        for i in range(58):
+            at=now+timedelta(minutes=30*i)
+            pv=2.5 if at.date()>now.date() and at.hour>=8 else 0
+            slots.append(Slot(at,.5,pv,pv*.65,.5))
+        dawn=next(i for i,s in enumerate(slots) if s.pv>=.1)
+        target=morning_budget(slots[dawn:],self.policy)['target_soc']
+        prior={'night_plan_date':slots[dawn].start.date().isoformat(),
+               'night_plan_target_soc':target,'evening_target_soc':target+1,
+               'night_split_enabled':'on','evening_done':'off'}
+        result=plan_dawn(slots,now,target+1,self.policy,previous_plan=prior)
+        self.assertFalse(result['night_split_enabled'])
+        self.assertEqual(result['evening_kwh'],0)
+        self.assertGreaterEqual(result['morning_kwh'],result['night_split_total_kwh'])
+
     def test_worsening_forecast_raises_target_and_stops_excess_discharge(self):
         now=self.now.replace(hour=22)
         slots=[]
