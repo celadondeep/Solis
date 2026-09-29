@@ -294,7 +294,14 @@ def build_forecast_mixin(profile):
         def publish_forecast_accuracy(self):
             entity = OUTPUT.get("forecast_accuracy")
             result = self.correction.get("last_accuracy")
-            if not entity or not isinstance(result, dict) or not result.get("date"):
+            if not entity:
+                return
+            if not isinstance(result, dict) or not result.get("date"):
+                self.set_state(entity, state="unknown", attributes={
+                    "friendly_name": f"{profile['SITE_LABEL']}: prognozės tikslumas",
+                    "unit_of_measurement": "%", "state_class": "measurement",
+                    "reason": "Laukiama pirmos užbaigtos paros su rytine prognoze",
+                })
                 return
             try:
                 value = float(result["percent"])
