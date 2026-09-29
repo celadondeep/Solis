@@ -2,21 +2,33 @@ name: Python validation
 
 on:
   push:
-    branches: [main]
+    branches: [main, codex/eimo-unified-20260912]
     paths:
+      - "energy_system/**"
+      - "plant_apps.py"
       - "energy_manager.py"
       - "energy_manager_eimo.py"
       - "consumption_model.py"
       - "consumption_model_eimo.py"
       - "solar_timing.py"
+      - "battery_health.py"
+      - "weekly_report.py"
+      - "power_quality_manager.py"
+      - "tests/test_*.py"
       - ".github/workflows/python-validation.yml"
   pull_request:
     paths:
+      - "energy_system/**"
+      - "plant_apps.py"
       - "energy_manager.py"
       - "energy_manager_eimo.py"
       - "consumption_model.py"
       - "consumption_model_eimo.py"
       - "solar_timing.py"
+      - "battery_health.py"
+      - "weekly_report.py"
+      - "power_quality_manager.py"
+      - "tests/test_*.py"
       - ".github/workflows/python-validation.yml"
   workflow_dispatch:
 
@@ -28,63 +40,47 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Compile AppDaemon modules
+      - name: Compile application and shared modules
         run: |
+          python3 -m compileall -q energy_system plant_apps.py
           python3 -m py_compile \
             energy_manager.py \
             energy_manager_eimo.py \
             consumption_model.py \
             consumption_model_eimo.py \
-            solar_timing.py
-      - name: Verify dynamic night planner markers
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          home = Path("energy_manager.py").read_text()
-          eimo = Path("energy_manager_eimo.py").read_text()
-          for text in (home, eimo):
-              assert "def night_plan_cycle" in text
-              assert "NIGHT_PLAN_INTERVAL_S" in text
-              assert "plan_generated_at" in text
-              assert "plan_valid_until" in text
-          assert 'NIGHT_PLAN_SLEEP_ENABLED   = True' in home
-          assert 'NIGHT_CONTROL_MIN_SOC      = 12' in home
-          assert 'NIGHT_PLAN_SLEEP_ENABLED   = False' in eimo
-          assert 'NIGHT_CONTROL_MIN_SOC      = 6' in eimo
-          print("Dynamic night planner invariants OK")
-          PY
-
+            solar_timing.py \
+            battery_health.py \
+            weekly_report.py \
+            power_quality_manager.py
+      - name: Run planner, forecast and configuration tests
+        run: python3 -m unittest discover -s tests -v
       - name: Test minute-resolution 100 W crossing
         run: |
           python3 - <<'PY'
-          from datetime import datetime, timezone
           from solar_timing import forecast_threshold_time
 
           def p(t, kw):
               return {"period_start": t, "pv_estimate": kw}
 
-          # Samples represent 30-min interval averages at their midpoints:
-          # 05:45 -> 0.05 kW, 06:15 -> 0.15 kW. Linear 0.10 crossing = 06:00.
-          d = [
+          # 30-minute forecast samples straddle the 100 W threshold.
+          samples = [
               p("2026-09-10T05:30:00+03:00", 0.05),
               p("2026-09-10T06:00:00+03:00", 0.15),
           ]
-          t = forecast_threshold_time(d, 0.10)
-          assert t.isoformat() == "2026-09-10T06:00:00+03:00", t
+          assert forecast_threshold_time(samples, 0.10).isoformat() == "2026-09-10T06:00:00+03:00"
 
-          # Non-round crossing must round UP, never before >=100 W.
-          d = [
+          # The estimated crossing is rounded up, never earlier than 100 W.
+          samples = [
               p("2026-09-10T05:30:00+03:00", 0.02),
               p("2026-09-10T06:00:00+03:00", 0.14),
           ]
-          t = forecast_threshold_time(d, 0.10)
-          assert t.isoformat() == "2026-09-10T06:05:00+03:00", t
+          assert forecast_threshold_time(samples, 0.10).isoformat() == "2026-09-10T06:05:00+03:00"
 
-          # No rising crossing -> no wake timestamp.
-          d = [
+          # No rising crossing means no wake timestamp.
+          samples = [
               p("2026-09-10T05:30:00+03:00", 0.02),
               p("2026-09-10T06:00:00+03:00", 0.08),
           ]
-          assert forecast_threshold_time(d, 0.10) is None
+          assert forecast_threshold_time(samples, 0.10) is None
           print("Minute-resolution Solcast 100 W interpolation OK")
           PY
