@@ -43,6 +43,14 @@ class NightEventsTests(unittest.TestCase):
                                    self.record("off", stopped), dict(evening, evening_done=True), 130, 30)
         self.assertEqual(end["evening_actual_end_at"], stopped.isoformat())
         self.assertEqual(end["sleep_saved_actual_kwh"], 0)
+        sampled = _observe_night_events(self.memory, stopped+timedelta(minutes=10),
+                                        self.record("off", stopped), self.record("off", stopped),
+                                        dict(evening, evening_done=True), 130, 30)
+        self.assertAlmostEqual(sampled["sleep_saved_actual_kwh"], .017, places=3)
+        stale = _observe_night_events(self.memory, stopped+timedelta(hours=1),
+                                      self.record("off", stopped), self.record("off", stopped),
+                                      dict(evening, evening_done=True), 130, 30)
+        self.assertAlmostEqual(stale["sleep_saved_actual_kwh"], .033, places=3)
         wake = stopped+timedelta(hours=3)
         resumed = _observe_night_events(self.memory, wake, self.record("off", stopped),
                                         self.record("on", wake), dict(evening, evening_done=True), 130, 30)

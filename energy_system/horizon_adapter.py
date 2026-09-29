@@ -123,8 +123,20 @@ def _observe_night_events(memory, now, slot_record, power_record, result, idle_w
         events[4] = 0
     memory["night_events"] = events
     attrs = power_record.get("attributes") or {}
-    confirmed = attrs.get("last_read") or now
-    through_minute = int(stamp(confirmed).timestamp()//60) if power == "off" else None
+    through_minute = None
+    if (events[4] and power_record.get("state") == "off"
+            and attrs.get("pending_target") is not True
+            and attrs.get("command_status") != "settling"):
+        # Estimate the ongoing off interval only while the last readback is
+        # recent. Freeze after 20 minutes of Cloud silence; close the interval
+        # at the observed ON edge when telemetry returns.
+        through = stamp(now)
+        if attrs.get("last_read"):
+            try:
+                through = min(through, stamp(attrs["last_read"])+timedelta(minutes=20))
+            except (ValueError, TypeError):
+                through = stamp(now)
+        through_minute = int(through.timestamp()//60)
     return _night_event_view(memory, now, idle_w, off_w, through_minute)
 
 
