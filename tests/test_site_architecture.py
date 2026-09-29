@@ -57,7 +57,9 @@ class PlantArchitecture(unittest.TestCase):
             d=build_dashboard(plant)
             self.assertEqual([v['path'] for v in d['views']],[plant.get('overview_path','energija'),'analize','atsipirkimas','vartojimas'])
             self.assertEqual(plant['power'],SITES[key]['energy']['ACTUATOR']['power'])
-            self.assertEqual(plant['analysis']['today']['consumption'],SITES[key]['energy']['SENSOR']['consumption_today'])
+            self.assertEqual(plant['analysis']['today']['consumption'],
+                             SITES[key]['energy'].get('CONSUMPTION_DAILY_SENSOR',
+                                                     SITES[key]['energy']['SENSOR']['consumption_today']))
             self.assertNotIn('planTime = ts(plan.committed_at)',d['button_card_templates']['se_panel']['custom_fields']['body'])
 
     def test_portfolio_optional(self):
