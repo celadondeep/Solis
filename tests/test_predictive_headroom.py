@@ -114,12 +114,93 @@ class PredictiveHeadroomTests(unittest.TestCase):
         now=self.now.replace(hour=22)
         slots=[Slot(now+timedelta(minutes=30*i),.5,
                     3 if 19<=i<=40 else 0,2 if 19<=i<=40 else 0,.3) for i in range(52)]
-        local=plan_dawn(slots,now,47,self.policy,execution_margin_minutes=5)
-        cloud=plan_dawn(slots,now,47,self.policy,execution_margin_minutes=30)
+        # 22:00 is already past this test's quiet cutoff, so it exercises the
+        # existing morning wake lead independently of the new evening stage.
+        local=plan_dawn(slots,now,47,self.policy,execution_margin_minutes=5,
+                        evening_quiet_hour=20)
+        cloud=plan_dawn(slots,now,47,self.policy,execution_margin_minutes=30,
+                        evening_quiet_hour=20)
         a=datetime.fromisoformat(local['discharge_start_at'])
         b=datetime.fromisoformat(cloud['discharge_start_at'])
         self.assertEqual(a-b,timedelta(minutes=25))
         self.assertEqual(local['cutoff_soc'],cloud['cutoff_soc'])
+
+    def test_p10_full_day_deficit_is_reported_but_does_not_cancel_headroom(self):
+        sunrise=self.now.replace(hour=8)
+        slots=[]
+        for i in range(32):
+            at=sunrise+timedelta(minutes=30*i)
+            # Central forecast recovers by 10:00 and has useful midday PV;
+            # P10 stays cloudy and never repays the all-day household deficit.
+            pv=.1 if i<4 else 2.0
+            low=.0 if i<12 else .2
+            slots.append(Slot(at,.5,pv,low,.5))
+        budget=morning_budget(slots,self.policy)
+        self.assertGreater(budget['p10_reserve_soc'],budget['reserve_soc'])
+        self.assertLess(budget['target_soc'],budget['p10_reserve_soc'])
+        self.assertGreater(budget['required_headroom_kwh'],0)
+
+    def test_evening_discharge_splits_40_60_and_latches_across_replans(self):
+        now=self.now.replace(hour=18)
+        slots=[]
+        for i in range(60):
+            at=now+timedelta(minutes=30*i)
+            pv=2.5 if at.hour>=8 and at.date()>now.date() else 0
+            slots.append(Slot(at,.5,pv,pv*.65,.3))
+        first=plan_dawn(slots,now,100,self.policy,evening_quiet_hour=23)
+        self.assertEqual(first['discharge_phase'],'evening')
+        self.assertTrue(first['export_now'])
+        self.assertTrue(first['night_split_enabled'])
+        self.assertAlmostEqual(first['evening_kwh']/first['night_split_total_kwh'],.4,delta=.01)
+        self.assertAlmostEqual(first['morning_kwh']/first['night_split_total_kwh'],.6,delta=.01)
+        replanned=plan_dawn(slots,now+timedelta(hours=1),96,self.policy,
+                            evening_quiet_hour=23,previous_plan=first)
+        self.assertEqual(replanned['evening_target_soc'],first['evening_target_soc'])
+        self.assertEqual(replanned['night_plan_target_soc'],first['night_plan_target_soc'])
+
+    def test_sub_1kwh_phase_is_moved_to_morning(self):
+        now=self.now.replace(hour=18)
+        slots=[]
+        for i in range(60):
+            at=now+timedelta(minutes=30*i)
+            pv=2.5 if at.hour>=8 and at.date()>now.date() else 0
+            slots.append(Slot(at,.5,pv,pv*.65,.3))
+        target=morning_budget(slots[28:],self.policy)['target_soc']
+        result=plan_dawn(slots,now,target+1,self.policy,evening_quiet_hour=23)
+        self.assertFalse(result['night_split_enabled'])
+        self.assertEqual(result['evening_kwh'],0)
+        self.assertGreater(result['morning_kwh'],0)
+        self.assertNotEqual(result['discharge_phase'],'evening')
+
+    def test_worsening_forecast_cannot_raise_locked_night_target(self):
+        now=self.now.replace(hour=22)
+        slots=[]
+        for i in range(60):
+            at=now+timedelta(minutes=30*i)
+            pv=.15 if at.date()>now.date() and at.hour>=8 else 0
+            slots.append(Slot(at,.5,pv,pv*.5,.3))
+        prior={'night_plan_date':(now.date()+timedelta(days=1)).isoformat(),
+               'night_plan_target_soc':30,'evening_target_soc':45,
+               'night_split_enabled':'on','evening_done':'off'}
+        result=plan_dawn(slots,now,65,self.policy,evening_quiet_hour=21,
+                         previous_plan=prior)
+        self.assertEqual(result['target_soc'],30)
+        self.assertGreater(result['p10_reserve_soc'],result['target_soc'])
+
+    def test_quiet_time_ends_evening_stage_and_moves_remaining_need_to_dawn(self):
+        now=self.now.replace(hour=23,minute=5)
+        slots=[]
+        for i in range(50):
+            at=now+timedelta(minutes=30*i)
+            pv=2.5 if at.hour>=8 and at.date()>now.date() else 0
+            slots.append(Slot(at,.5,pv,pv*.65,.3))
+        prior={'night_plan_date':(now.date()+timedelta(days=1)).isoformat(),
+               'night_plan_target_soc':27,'evening_target_soc':70,
+               'night_split_enabled':'on','evening_done':'off'}
+        result=plan_dawn(slots,now,82,self.policy,evening_quiet_hour=23,
+                         previous_plan=prior)
+        self.assertNotEqual(result['discharge_phase'],'evening')
+        self.assertGreaterEqual(result['cutoff_soc'],result['night_plan_target_soc'])
 
     def test_planner_preserves_manual_storm_and_hard_floor(self):
         guidance = self.evaluate()
