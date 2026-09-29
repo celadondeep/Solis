@@ -54,11 +54,14 @@ class DaytimeBand(unittest.TestCase):
         self.assertEqual(normal.slot_cutoff_soc,95)
         self.assertEqual(decide_plan(replace(inp,storm=True),PlannerPolicy(hard_floor=6)).priority,'storm')
         self.assertFalse(decide_plan(replace(inp,manual=True),PlannerPolicy(hard_floor=6)).actionable)
-    def test_night_sleep_plan_remains_authoritative(self):
+    def test_evening_discharge_stops_at_its_cutoff_before_night_sleep(self):
         now=self.now.replace(hour=22)
         slots=[Slot(now+timedelta(minutes=30*i),.5,3 if 19<=i<=40 else 0,2 if 19<=i<=40 else 0,.3) for i in range(52)]
         r=plan_dawn(slots,now,47,self.policy,production_on=False,execution_margin_minutes=30)
-        self.assertTrue(r['night_active']);self.assertFalse(r['export_now']);self.assertFalse(r['inverter_on'])
+        self.assertTrue(r['night_active']);self.assertTrue(r['export_now']);self.assertTrue(r['inverter_on'])
+        self.assertEqual(r['discharge_phase'],'evening')
+        self.assertGreater(r['cutoff_soc'],r['target_soc'])
+        self.assertTrue(r['evening_quiet_at'].startswith('2026-09-18T23:00'))
 
     def test_night_sleep_wins_over_legacy_production_window(self):
         guidance=dict(valid=True,night_active=True,inverter_on=False,
