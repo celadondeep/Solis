@@ -1,24 +1,35 @@
+# Shared classes, independent configuration and state for every plant.
 energy_manager:
-  module: energy_manager
-  class: EnergyManager
-
+  module: plant_apps
+  class: EnergyManager_home
+energy_manager_eimo:
+  module: plant_apps
+  class: EnergyManager_eimo
+consumption_model:
+  module: plant_apps
+  class: ConsumptionModel_home
+consumption_model_eimo:
+  module: plant_apps
+  class: ConsumptionModel_eimo
 battery_health:
   module: battery_health
   class: BatteryHealth
-
-consumption_model:
-  module: consumption_model
-  class: ConsumptionModel
-
+  site: home
 weekly_report:
   module: weekly_report
   class: WeeklyReport
-
-# ── 2-a elektrinė (Eimo SE) — atskira, nepriklausoma sistema (cloud Solis) ──
-energy_manager_eimo:
-  module: energy_manager_eimo
-  class: EnergyManager
-
-consumption_model_eimo:
-  module: consumption_model_eimo
-  class: ConsumptionModel
+  site: home
+energy_shadow_home:
+  module: plant_apps
+  class: ShadowManager_home
+energy_shadow_eimo:
+  module: plant_apps
+  class: ShadowManager_eimo
+power_quality_home:
+  module: power_quality_manager
+  class: PowerQualityManager
+  site: home
+power_quality_eimo:
+  module: power_quality_manager
+  class: PowerQualityManager
+  site: eimo

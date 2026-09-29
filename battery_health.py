@@ -22,64 +22,23 @@ from datetime import datetime, timedelta
 import json
 import os
 
-
-# ============================================================
-#  KONFIGŪRACIJA
-# ============================================================
-
-BATTERY_CAPACITY_KWH = 16.0
-
-# Temperatūros ribos
-TEMP_WARNING  = 40.0   # °C — įspėjimas
-TEMP_CRITICAL = 45.0   # °C — kritinis
-TEMP_LOW      = 5.0    # °C — per šalta (žiemą)
-
-# SOH ribos
-SOH_WARNING  = 85.0    # % — įspėjimas
-SOH_CRITICAL = 75.0    # % — rimta degradacija
-
-# Efektyvumo riba
-EFFICIENCY_MIN = 88.0  # % — žemiau = anomalija
-
-# Ciklų perspėjimas
-CYCLES_WARNING = 3000  # LFP baterijoms ~6000 ciklų
-
-# Tikri Solis Modbus entity (solis_s6_eh3p_*). Ciklų sensoriaus inverteris
-# neturi — ekvivalentiniai ciklai skaičiuojami iš bendros įkrovos energijos:
-# ciklai ≈ total_charge_kwh / naudingoji talpa (14.4 kWh = 16 kWh × 90%,
-# ruožas 10–100%; BMS fizinis dugnas 10%, 2026-07-14 — suderinta su
-# energy_manager.py ir sensor.battery_equivalent_cycles).
-BATTERY_USABLE_KWH = 14.4
-
-SENSOR = {
-    "temp":         "sensor.solis_s6_eh3p_battery_temperature_bms",
-    "soc":          "sensor.solis_s6_eh3p_battery_soc",
-    "soh":          "sensor.solis_s6_eh3p_battery_soh",
-    "voltage":      "sensor.solis_s6_eh3p_battery_voltage",
-    "current":      "sensor.solis_s6_eh3p_battery_current",
-    "charge":       "sensor.solis_s6_eh3p_today_battery_charge_energy",
-    "discharge":    "sensor.solis_s6_eh3p_today_battery_discharge_energy",
-    "total_charge": "sensor.solis_s6_eh3p_total_battery_charge_energy",
-    # Inverterio savivarta iš baterijos (kWh/d.) — kai PV < apkrova,
-    # inverterio ~140 W maitinami iš baterijos, bet iškrovimo skaitliuke
-    # neužsiskaito. Pridedama prie iškrautos energijos, kad inverterio
-    # nuostoliai nebūtų priskirti baterijai.
-    "inv_self":     "sensor.inverter_self_from_battery_today",
-}
-
-# Istorijos failas
-# Kelias per __file__ — AppDaemon konteineryje /config rodo į addon'o vidinį
-# katalogą, todėl hardcoded /config/appdaemon/... ten neegzistuoja.
-HISTORY_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "battery_history.json")
+from energy_system.battery_health_math import (
+    EFFICIENCY_MAX_VALID,
+    battery_efficiency_percent,
+    is_plausible_efficiency,
+    plausible_efficiency_rows,
+)
 
 
-# ============================================================
-#  KLASĖ
-# ============================================================
+from energy_system.site_registry import get_site
+
 
 class BatteryHealth(hass.Hass):
 
     def initialize(self):
+        site = get_site(self.args["site"])
+        self.profile = site["battery_health"]
+        self.site_label = site["energy"]["SITE_LABEL"]
         self.log("BatteryHealth stebėjimas paleidžiamas...")
 
         self.temp_history     = []
@@ -99,8 +58,10 @@ class BatteryHealth(hass.Hass):
         # Efektyvumo skaičiavimas — kas dieną 23:55
         self.run_daily(self.calculate_daily_efficiency, "23:55:00")
 
-        # SOH ir ciklų patikra — kas savaitę pirmadienį 08:00
-        self.run_every(self.check_long_term_health, "now", 7 * 24 * 60 * 60)
+        # SOH ir ciklų patikra — kasdien 08:00; metodas vykdo tik pirmadienį.
+        # Ši AppDaemon versija neturi run_weekly(), todėl savaitės diena
+        # tikrinama pačiame callback ir išlaikomas vietinis 08:00 per DST.
+        self.run_daily(self.check_long_term_health, "08:00:00")
 
         # Pilna ataskaita — kas mėnesį 1-ą dieną
         self.run_daily(self.monthly_report, "09:00:00")
@@ -113,7 +74,7 @@ class BatteryHealth(hass.Hass):
 
     def get_float(self, key, default=0.0):
         try:
-            val = self.get_state(SENSOR[key])
+            val = self.get_state(self.profile["SENSOR"][key])
             if val in (None, "unavailable", "unknown"):
                 return default
             return float(val)
@@ -143,8 +104,8 @@ class BatteryHealth(hass.Hass):
     def load_history(self):
         """Įkelia išsaugotą istoriją iš failo."""
         try:
-            if os.path.exists(HISTORY_FILE):
-                with open(HISTORY_FILE, "r") as f:
+            if os.path.exists(self.profile["HISTORY_FILE"]):
+                with open(self.profile["HISTORY_FILE"], "r") as f:
                     data = json.load(f)
                     self.efficiency_data = data.get("efficiency", [])
                     self.day_start_soc   = data.get("day_start_soc")
@@ -162,7 +123,7 @@ class BatteryHealth(hass.Hass):
                 "day_start_soc": self.day_start_soc,
                 "updated": datetime.now().isoformat()
             }
-            with open(HISTORY_FILE, "w") as f:
+            with open(self.profile["HISTORY_FILE"], "w") as f:
                 json.dump(data, f, indent=2)
         except Exception as e:
             self.log(f"Istorijos išsaugojimo klaida: {e}")
@@ -188,27 +149,27 @@ class BatteryHealth(hass.Hass):
             self.temp_history.pop(0)
 
         # Kritinė temperatūra
-        if temp >= TEMP_CRITICAL:
+        if temp >= self.profile["TEMP_CRITICAL"]:
             self.send_alert(
                 "temp_critical",
                 f"⚠️ KRITINĖ baterijos temperatūra: {temp:.1f}°C!\n"
-                f"Maksimali leistina: {TEMP_CRITICAL}°C\n"
+                f"Maksimali leistina: {self.profile["TEMP_CRITICAL"]}°C\n"
                 f"Patikrinkite vėdinimą ir apkrovą!",
                 title="Kritinė temperatūra",
                 level="ERROR"
             )
 
         # Įspėjamoji temperatūra
-        elif temp >= TEMP_WARNING:
+        elif temp >= self.profile["TEMP_WARNING"]:
             self.send_alert(
                 "temp_warning",
                 f"⚠️ Aukšta baterijos temperatūra: {temp:.1f}°C\n"
-                f"Rekomenduojama riba: {TEMP_WARNING}°C",
+                f"Rekomenduojama riba: {self.profile["TEMP_WARNING"]}°C",
                 level="WARNING"
             )
 
         # Per žema temperatūra
-        elif temp <= TEMP_LOW:
+        elif temp <= self.profile["TEMP_LOW"]:
             self.send_alert(
                 "temp_low",
                 f"🥶 Žema baterijos temperatūra: {temp:.1f}°C\n"
@@ -252,8 +213,14 @@ class BatteryHealth(hass.Hass):
             self.log("[HEALTH] Nėra paros pradžios SOC — efektyvumas šiandien neskaičiuojamas.")
             return
 
-        soc_delta_kwh = (self.get_float("soc") - snap["soc"]) / 100 * BATTERY_CAPACITY_KWH
-        efficiency = ((discharged + inv_self + soc_delta_kwh) / charged) * 100
+        soc_delta_kwh = (self.get_float("soc") - snap["soc"]) / 100 * self.profile["BATTERY_CAPACITY_KWH"]
+        efficiency = battery_efficiency_percent(
+            charged, discharged, inv_self, soc_delta_kwh
+        )
+        if efficiency is None:
+            self.log("[HEALTH] Efektyvumo skaičiavimui gauti netinkami duomenys.")
+            return
+        efficiency_valid = is_plausible_efficiency(efficiency)
 
         today_data = {
             "date":       today,
@@ -262,6 +229,7 @@ class BatteryHealth(hass.Hass):
             "inv_self":   round(inv_self, 2),
             "soc_delta_kwh": round(soc_delta_kwh, 2),
             "efficiency": round(efficiency, 1),
+            "valid": efficiency_valid,
             "temp_max":   round(max([h["temp"] for h in self.temp_history], default=0), 1),
             "temp_min":   round(min([h["temp"] for h in self.temp_history], default=0), 1),
         }
@@ -275,12 +243,23 @@ class BatteryHealth(hass.Hass):
             f"inverterio savivarta: {inv_self:.2f} kWh, ΔSOC: {soc_delta_kwh:+.2f} kWh)"
         )
 
-        # Įspėjimas jei efektyvumas per žemas
-        if efficiency < EFFICIENCY_MIN and charged > 2.0:
+        # Nefizinis >105 % rezultatas yra duomenų kokybės problema, ne
+        # baterijos sveikatos matas. Įrašą paliekame auditui, bet trendams
+        # ir mėnesinei ataskaitai jo nenaudojame.
+        if not efficiency_valid:
+            self.send_alert(
+                "efficiency_data_invalid",
+                f"⚠️ Nefizinis baterijos balanso rezultatas: {efficiency:.1f}%\n"
+                f"Leistina matavimo tolerancija: iki {EFFICIENCY_MAX_VALID:.0f}%\n"
+                "Įrašas paliktas istorijoje, bet neįtrauktas į baterijos degradacijos trendą.",
+                title="Baterijos matavimo duomenų kokybė",
+                level="WARNING"
+            )
+        elif efficiency < self.profile["EFFICIENCY_MIN"] and charged > 2.0:
             self.send_alert(
                 "efficiency_low",
                 f"📉 Žemas baterijos efektyvumas: {efficiency:.1f}%\n"
-                f"Norma: >{EFFICIENCY_MIN}%\n"
+                f"Norma: >{self.profile["EFFICIENCY_MIN"]}%\n"
                 f"Įkrauta: {charged:.1f} kWh, Iškrauta: {discharged:.1f} kWh, "
                 f"ΔSOC: {soc_delta_kwh:+.1f} kWh\n"
                 f"Gali reikšti baterijos degradaciją.",
@@ -294,10 +273,13 @@ class BatteryHealth(hass.Hass):
     def get_equivalent_cycles(self):
         """Ekvivalentiniai ciklai = bendra įkrovos energija / naudingoji talpa."""
         total_charge = self.get_float("total_charge", default=0.0)
-        return total_charge / BATTERY_USABLE_KWH if total_charge > 0 else 0.0
+        return total_charge / self.profile["BATTERY_USABLE_KWH"] if total_charge > 0 else 0.0
 
     def check_long_term_health(self, kwargs):
-        """Savaitinė ilgalaikės sveikatos patikra."""
+        """Savaitinė ilgalaikės sveikatos patikra (pirmadienį 08:00)."""
+        if datetime.now().weekday() != 0:
+            return
+
         soh    = self.get_float("soh", default=100.0)
         cycles = self.get_equivalent_cycles()
 
@@ -305,7 +287,7 @@ class BatteryHealth(hass.Hass):
 
         # SOH patikra
         if soh > 0:
-            if soh <= SOH_CRITICAL:
+            if soh <= self.profile["SOH_CRITICAL"]:
                 self.send_alert(
                     "soh_critical",
                     f"🔋 Kritiškai žemas SOH: {soh:.1f}%\n"
@@ -314,7 +296,7 @@ class BatteryHealth(hass.Hass):
                     title="Baterijos degradacija",
                     level="ERROR"
                 )
-            elif soh <= SOH_WARNING:
+            elif soh <= self.profile["SOH_WARNING"]:
                 self.send_alert(
                     "soh_warning",
                     f"🔋 SOH: {soh:.1f}% — pradeda mažėti talpa.\n"
@@ -323,19 +305,20 @@ class BatteryHealth(hass.Hass):
                 )
 
         # Ciklų patikra
-        if cycles >= CYCLES_WARNING:
+        if cycles >= self.profile["CYCLES_WARNING"]:
             self.send_alert(
                 "cycles_warning",
                 f"🔄 Ciklų skaičius: {cycles:.0f}\n"
-                f"Perspėjimo riba: {CYCLES_WARNING}\n"
+                f"Perspėjimo riba: {self.profile["CYCLES_WARNING"]}\n"
                 f"LFP baterijos tarnavimo laikas ~6000 ciklų.",
                 level="WARNING"
             )
 
-        # Efektyvumo trendas (paskutinės 4 savaitės)
-        if len(self.efficiency_data) >= 28:
-            recent    = [d["efficiency"] for d in self.efficiency_data[-7:]]
-            older     = [d["efficiency"] for d in self.efficiency_data[-28:-7]]
+        # Efektyvumo trendas (28 paskutiniai fiziškai galimi matavimai).
+        valid_data = plausible_efficiency_rows(self.efficiency_data)
+        if len(valid_data) >= 28:
+            recent    = [d["efficiency"] for d in valid_data[-7:]]
+            older     = [d["efficiency"] for d in valid_data[-28:-7]]
             avg_recent = sum(recent) / len(recent)
             avg_older  = sum(older) / len(older)
             drop = avg_older - avg_recent
@@ -362,8 +345,8 @@ class BatteryHealth(hass.Hass):
         if len(self.efficiency_data) < 7:
             return
 
-        last_30 = self.efficiency_data[-30:]
-        efficiencies = [d["efficiency"] for d in last_30 if d["efficiency"] > 0]
+        last_30 = plausible_efficiency_rows(self.efficiency_data[-30:])
+        efficiencies = [d["efficiency"] for d in last_30]
         temps_max    = [d["temp_max"] for d in last_30 if d["temp_max"] > 0]
 
         if not efficiencies:

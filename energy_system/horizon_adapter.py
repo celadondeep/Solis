@@ -1,0 +1,437 @@
+"""HA input adapter for the shared forward energy model; no actuator writes."""
+from datetime import datetime, timedelta
+import json
+from time import monotonic
+from zoneinfo import ZoneInfo
+from dataclasses import replace
+from energy_system.dawn import plan_dawn,day_dispatch
+from energy_system.soc_buffer import preferred_policy, daytime_buffer, grid_present
+from energy_system.consumption_forecast import forecast_reader, intraday_ratio, fresh_daily_value
+
+from energy_system.horizon import (
+    VERSION, HorizonPolicy, clamp, finite, forecast_slots, plan_horizon, stamp, ha_attributes,
+)
+
+
+_NIGHT_MEMORY_KEYS = (
+    "night_plan_date", "night_plan_target_soc", "evening_target_soc",
+    "night_split_enabled", "evening_done", "discharge_phase",
+    "discharge_deadline", "discharge_committed", "pv_start_at", "calculated_at",
+)
+
+
+def _night_plan_memory(value):
+    """Keep only execution history needed to resume the current night."""
+    if not isinstance(value, dict):
+        return None
+    memory = {key: value[key] for key in _NIGHT_MEMORY_KEYS if key in value}
+    if not memory.get("night_plan_date") or not memory.get("pv_start_at"):
+        return None
+    return memory
+
+
+def _decode_night_plan_state(raw):
+    """Decode compact persistent helper data; tolerate empty/old values."""
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        keys = {
+            "d": "night_plan_date", "t": "night_plan_target_soc",
+            "e": "evening_target_soc", "s": "night_split_enabled",
+            "v": "evening_done", "p": "discharge_phase",
+            "c": "discharge_committed", "l": "discharge_deadline",
+            "r": "pv_start_at", "a": "calculated_at",
+        }
+        expanded = {target: data[source] for source, target in keys.items() if source in data}
+        return _night_plan_memory(expanded)
+    except (TypeError, ValueError):
+        return None
+
+
+def _encode_night_plan_state(memory, saved_at):
+    """Serialize night memory compactly for HA's 255-character input_text."""
+    if not isinstance(memory, dict):
+        return None
+    data = {
+        "d": memory.get("night_plan_date"), "t": memory.get("night_plan_target_soc"),
+        "e": memory.get("evening_target_soc"), "s": memory.get("night_split_enabled"),
+        "v": memory.get("evening_done"), "p": memory.get("discharge_phase"),
+        "c": memory.get("discharge_committed"), "l": memory.get("discharge_deadline"),
+        "r": memory.get("pv_start_at"), "a": saved_at,
+    }
+    raw = json.dumps(data, separators=(",", ":"), ensure_ascii=True)
+    return raw if len(raw) <= 255 else None
+
+
+def build_horizon_mixin(profile):
+    sensors, output = profile["SENSOR"], profile["OUTPUT"]
+    site, label = profile["KEY"], profile["SITE_LABEL"]
+    config = profile.get("HORIZON", {})
+    buffer = profile["SOC_BUFFER"]
+    policy = HorizonPolicy(
+        hard_floor=profile["PLAN_HARD_FLOOR"],
+        kwh_per_soc=profile["KWH_PER_SOC"],
+        export_kw=profile["ESO_EXPORT_LIMIT_KW"],
+        **config,
+    )
+
+    class HorizonMixin:
+        def _consumed_today(self, now):
+            daily_entity = profile.get('CONSUMPTION_DAILY_SENSOR')
+            if daily_entity:
+                return fresh_daily_value(self._read_state_record(daily_entity), now,
+                                         profile.get('CONSUMPTION_ACTUAL_MAX_AGE_SECONDS', 1800))
+            entity = sensors["consumption_today"]
+            current = self.get_optional_sensor_float(entity)
+            if not profile.get("CONSUMPTION_TODAY_IS_TOTAL", False):
+                return current
+            # Eimo uses a lifetime integration meter, not a daily counter.
+            # Recorder supplies the value at midnight, once per day/restart.
+            midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            cache = getattr(self, "_horizon_daily_base", None)
+            if not cache or cache[0] != now.date():
+                self._horizon_daily_base = (now.date(), None)
+                try:
+                    history = self.get_history(entity_id=entity, start_time=midnight,
+                                               end_time=midnight+timedelta(seconds=1))
+                    records = history[0] if history and isinstance(history[0], list) else []
+                    for record in records:
+                        at = stamp(record.get("last_changed") or record.get("last_updated"))
+                        value = finite(record.get("state"))
+                        if at <= stamp(midnight)+timedelta(seconds=1) and value is not None:
+                            self._horizon_daily_base = (now.date(), value)
+                            break
+                except Exception as exc:
+                    self.log(f"[{site}] Nepavyko nuskaityti paros skaitiklio bazės: {exc}", level="WARNING")
+            base = self._horizon_daily_base[1]
+            return current-base if current is not None and base is not None and current >= base else None
+
+        def horizon_guidance(self, soc, force=False):
+            now = datetime.now(ZoneInfo(profile.get("TIMEZONE", "Europe/Vilnius")))
+            previous = getattr(self, "_horizon_result", None)
+            night_previous = getattr(self, "_night_plan_state", None)
+            night_state_entity = output.get("night_state")
+            if night_previous is None and night_state_entity:
+                try:
+                    helper = self._read_state_record(night_state_entity)
+                    night_previous = _decode_night_plan_state(helper.get("state"))
+                    if night_previous is not None:
+                        self._night_plan_state = night_previous
+                        self._night_plan_helper_value = helper.get("state")
+                except Exception:
+                    pass
+            if previous is None or night_previous is None:
+                # AppDaemon may restart between the evening and dawn stages.
+                # The night-stage memory is independent of forecast validity,
+                # so a temporary forecast error must not discard that memory.
+                try:
+                    saved = self._read_state_record(output["horizon"])
+                    attrs = saved.get("attributes") or {}
+                    memory = _night_plan_memory(attrs.get("night_plan_memory"))
+                    # Backward compatibility with 4.5 state written before
+                    # the independent memory attribute existed.
+                    if memory is None and attrs.get("night_active") in (True, "on", "true"):
+                        memory = _night_plan_memory(attrs)
+                    if memory is not None:
+                        pv_start = stamp(memory["pv_start_at"])
+                        calculated = stamp(memory.get("calculated_at", attrs.get("calculated_at")))
+                        age = (stamp(now)-calculated).total_seconds()
+                    else:
+                        pv_start, age = None, float("inf")
+                    if (attrs.get("site") == site and memory is not None
+                            and pv_start > stamp(now) and 0 <= age < 18*3600):
+                        night_previous = memory
+                        self._night_plan_state = memory
+                    if (previous is None and attrs.get("site") == site
+                            and attrs.get("valid") in (True, "on", "true")
+                            and pv_start is not None and pv_start > stamp(now)
+                            and 0 <= age < 18*3600):
+                        previous = attrs
+                        self._horizon_result = previous
+                except Exception:
+                    pass
+            power = self._read_state_record(sensors["power_state"]).get("state")
+            boundary = previous.get("wake_at") if previous else None
+            crossed = bool(boundary and stamp(now) >= stamp(boundary))
+            soc_changed = (finite(soc) is None or not previous or
+                abs(float(soc)-float(previous.get("measured_soc", -100))) >= 0.5)
+            if (not force and previous is not None
+                    and not soc_changed and not crossed
+                    and power == previous.get("observed_power")
+                    and monotonic() - getattr(self, "_horizon_at", 0) < 55):
+                return previous
+            try:
+                result = self._calculate_horizon(now, soc)
+            except Exception as exc:
+                result = dict(version=VERSION, valid=False, export_now=False,
+                              night_active=False, inverter_on=True,
+                              solar_export_priority=False, soc_buffer_active=False,
+                              predictive_buffer_due=False, buffer_required_kwh=0,
+                              buffer_first_pressure_at=None, buffer_protected_soc=None,
+                              reserve_soc=100, cutoff_soc=100, target_soc=profile["PLAN_TARGET_BAND_CEILING"],
+                              wake_at=None, discharge_start_at=None, discharge_deadline=None,
+                              required_preexport_kwh=0, required_headroom_kwh=0,
+                              standby_saved_kwh=0, dawn=None,
+                              reason=f"Prognozė nepatikima; savas vartojimas be priverstinio eksporto ({str(exc)[:100]})")
+                memory = _night_plan_memory(getattr(self, "_night_plan_state", None))
+                if memory is not None:
+                    result["night_plan_memory"] = memory
+                if not previous or previous.get("valid"):
+                    self.log(f"[{site}] {result['reason']}", level="WARNING")
+            result.update(site=site, calculated_at=now.isoformat(),
+                          measured_soc=finite(soc, -100), observed_power=power,
+                          expires_at=(now + timedelta(minutes=7)).isoformat(),
+                          forecast_source=profile["FORECAST_SOURCE_LABEL"],
+                          reserve_scope="Ryto talpos tikslas ir apsauga nuo priverstinio eksporto; nakties miegas saugo likusį įkrovimą",
+                          grid_charging="Naujų įkrovimo iš tinklo komandų nėra; kaupiama PV")
+            self._horizon_result = result
+            if result.get("valid") and result.get("night_active"):
+                memory = _night_plan_memory(result)
+                if memory is not None:
+                    self._night_plan_state = memory
+                    if night_state_entity:
+                        old = getattr(self, "_night_plan_helper_value", None)
+                        old_memory = _decode_night_plan_state(old)
+                        old_semantics = {k: v for k, v in (old_memory or {}).items() if k != "calculated_at"}
+                        new_semantics = {k: v for k, v in memory.items() if k != "calculated_at"}
+                        if old_semantics != new_semantics:
+                            raw = _encode_night_plan_state(memory, now.isoformat())
+                            if raw is not None:
+                                try:
+                                    self.call_service("input_text/set_value", entity_id=night_state_entity, value=raw)
+                                    self._night_plan_helper_value = raw
+                                    self._night_plan_state["calculated_at"] = now.isoformat()
+                                except Exception as exc:
+                                    self.log(f"[{site}] Nepavyko išsaugoti nakties etapo atminties: {exc}", level="WARNING")
+                            else:
+                                self.log(f"[{site}] Nakties atmintis netelpa į HA input_text", level="ERROR")
+            if getattr(self, "_night_plan_state", None) is not None:
+                result["night_plan_memory"] = self._night_plan_state
+            self._horizon_at = monotonic()
+            self.last_target_soc = 100 if self.is_storm_mode() else int(result.get("target_soc", result["reserve_soc"]))
+            self.set_state(output["target_soc"], state=str(self.last_target_soc), attributes={
+                "friendly_name": f"{label}: tikslinė SOC riba",
+                "unit_of_measurement": "%", "device_class": "battery",
+                "model_version": VERSION, "reason": result["reason"],
+            })
+            self.set_state(output["horizon"], state=(
+                "export" if result["export_now"] else "sleep" if result.get("night_active")
+                and not result.get("inverter_on",True) else "self_use" if result["valid"] else "fallback"
+            ), attributes=ha_attributes({"friendly_name": f"{label}: energijos perspektyva", **result}))
+            if not previous or (previous.get("export_now"), previous.get("valid"),previous.get("inverter_on")) != (
+                    result["export_now"], result["valid"],result.get("inverter_on")):
+                self.log(f"[{site}] Horizon: {result['reason']}; rezervas {result['reserve_soc']}%")
+            return result
+
+        def _calculate_horizon(self, now, soc):
+            actual_export = self.get_optional_sensor_float(sensors.get("export_limit"))
+            active_policy = replace(policy,export_kw=min(policy.export_kw,max(0,actual_export/1000))) \
+                if actual_export is not None else policy
+            active_policy = preferred_policy(active_policy,
+                self.get_optional_sensor_float(buffer["min"]),
+                self.get_optional_sensor_float(buffer["max"]),
+                extra_headroom_soc=profile.get("EXTRA_HEADROOM_SOC", 0))
+            connected = grid_present(now, self._read_state_record(buffer["heartbeat"]).get("state"),
+                [self.get_optional_sensor_float(e) for e in buffer["voltages"]],
+                self.get_optional_sensor_float(buffer["frequency"]), buffer["max_age"])
+            # Read-only BMS acceptance. No guessed Eimo taper curve or register writes.
+            current = self.get_optional_sensor_float(buffer.get("charge_current"))
+            voltage = self.get_optional_sensor_float(buffer.get("battery_voltage"))
+            acceptance = (current * voltage / 1000 if connected and current is not None
+                          and current >= 0 and voltage is not None and 40 <= voltage <= 65 else None)
+            records = []
+            for key, expected in (("solcast_today_total", now.date()),
+                                  ("solcast_tomorrow", (now + timedelta(days=1)).date())):
+                record = self._read_state_record(sensors[key])
+                attrs = record.get("attributes") or {}
+                updated = stamp(record.get("last_updated") or record.get("last_reported"))
+                age = (stamp(now) - updated).total_seconds()
+                if not -300 <= age <= 30 * 3600 or attrs.get("dataCorrect") is False:
+                    raise ValueError("stale/invalid Solcast")
+                rows = attrs.get("detailedForecast")
+                if not isinstance(rows, list) or not rows:
+                    raise ValueError("missing detailedForecast")
+                if any(stamp(r["period_start"]).astimezone(now.tzinfo).date() != expected for r in rows):
+                    raise ValueError("forecast date mismatch")
+                records.extend(rows)
+            consumption_record = self._read_state_record(sensors["consumption_profile"])
+            tomorrow = self.get_sensor_float(profile["CONSUMPTION_TOMORROW_SENSOR"], default=-1)
+            load_at = forecast_reader(consumption_record, now, tomorrow,
+                                      profile.get('CONSUMPTION_MAX_TRAINING_AGE_DAYS', 7))
+
+            end = (now + timedelta(days=2)).replace(hour=0, minute=0, second=0, microsecond=0)
+            initial, expected_pv, expected_load = forecast_slots(
+                records, now, end, load_at, self.hourly_factor,
+                self_kw=profile["INVERTER_SELF_KW"],
+            )
+            pv_actual = self.get_optional_sensor_float(sensors["pv_today"])
+            consumption_actual = self._consumed_today(now)
+            pv_ratio = load_ratio = 1.0
+            if pv_actual is not None and pv_actual >= 0 and expected_pv >= 1.0:
+                weight = min(0.75, expected_pv / 5.0 * 0.75)
+                pv_ratio = clamp(1 + (pv_actual / expected_pv - 1) * weight, 0.55, 1.35)
+                # Full battery/export ceiling can curtail production; do not learn it as cloud.
+                grid = self.get_optional_float("grid_power")
+                if soc is not None and soc >= 93 and grid is not None and abs(grid) >= policy.export_kw * 900:
+                    pv_ratio = max(1.0, pv_ratio)
+            hybrid = getattr(load_at, 'hybrid', False)
+            load_ratio = 1.0 if hybrid else intraday_ratio(consumption_actual, expected_load,
+                                        profile.get('CONSUMPTION_INTRADAY_GAIN', 0.0))
+            # Tomorrow retains its independently learned daily forecast.
+            tomorrow_ratio = 1.0
+            slots, _, _ = forecast_slots(
+                records, now, end, load_at, self.hourly_factor,
+                today_ratio=pv_ratio, load_ratio=load_ratio,
+                tomorrow_load_ratio=tomorrow_ratio, self_kw=profile["INVERTER_SELF_KW"],
+            )
+            # Short-lived measured demand correction; do not project a kettle
+            # spike over the whole night or count sleeping grid loads as DC drain.
+            load_now = self.get_optional_float("house_load")
+            if not hybrid and connected and load_now is not None and load_now >= 0:
+                adjusted = []
+                for s in slots:
+                    lead = (stamp(s.start)-stamp(now)).total_seconds()/3600
+                    weight = 0.5*max(0,1-lead)
+                    live_load = load_now/1000 + profile["INVERTER_SELF_KW"]
+                    adjusted.append(replace(s,load=s.load*(1-weight)+live_load*weight))
+                slots = adjusted
+            if acceptance is not None:
+                slots[0] = replace(slots[0], charge_limit_kw=acceptance)
+            # Cumulative daily bias reacts too slowly after a cloudy morning.
+            # Blend fresh measured PV for one hour only; retain the P10 downside.
+            pv_now = self.get_optional_float("pv_power")
+            if connected and pv_now is not None and pv_now >= 0:
+                adjusted = []
+                for s in slots:
+                    lead = (stamp(s.start)-stamp(now)).total_seconds()/3600
+                    weight = 0.5*max(0, 1-lead)
+                    pv = s.pv*(1-weight) + pv_now/1000*weight
+                    adjusted.append(replace(s, pv=pv, low_pv=min(s.low_pv, pv)))
+                slots = adjusted
+            result = plan_horizon(slots, soc, active_policy)
+            pv_now = self.get_optional_float("pv_power")
+            production = (slots[0].pv >= profile["MORNING_PV_THRESHOLD_KW"] or
+                (pv_now is not None and pv_now/1000 >= profile["MORNING_PV_THRESHOLD_KW"]))
+            previous = getattr(self, "_horizon_result", {})
+            night_previous = getattr(self, "_night_plan_state", None) or previous
+            deadline = night_previous.get("discharge_deadline")
+            committed = (night_previous.get("discharge_committed") in (True, "on", "true")
+                         and deadline is not None and stamp(now) < stamp(deadline))
+            if not committed:
+                committed = (previous.get("valid") in (True, "on", "true")
+                             and previous.get("night_active") in (True, "on", "true")
+                             and previous.get("export_now") in (True, "on", "true")
+                             and previous.get("discharge_phase") == "morning" and deadline is not None
+                             and stamp(now) < stamp(deadline))
+            night_cfg = profile.get("NIGHT_DISCHARGE", {})
+            night = plan_dawn(slots,now,soc,active_policy,production_on=production,
+                power_control=profile["INVERTER_CONTROL_AVAILABLE"],
+                power_on=self._read_state_record(sensors["power_state"]).get("state") != "off",
+                already_exporting=self._read_state_record(profile["ACTUATOR"]["slot"]).get("state") == "on",
+                export_floor_soc=self.get_optional_sensor_float(sensors["daytime_export_floor"]),
+                idle_kw=profile["INVERTER_IDLE_W"]/1000,
+                off_kw=profile["INVERTER_OFF_W"]/1000,
+                pv_threshold_kw=profile["MORNING_PV_THRESHOLD_KW"],
+                wake_margin_minutes=profile["MORNING_ON_MARGIN_MIN"],
+                execution_margin_minutes=profile.get("HEADROOM_EXECUTION_MINUTES", 5),
+                discharge_committed=committed, previous_plan=night_previous,
+                evening_fraction=night_cfg.get("EVENING_FRACTION", 0.4),
+                evening_quiet_hour=night_cfg.get("QUIET_HOUR", 23.0),
+                minimum_phase_kwh=night_cfg.get("MINIMUM_PHASE_KWH", 1.0),
+                target_decrease_hysteresis_soc=night_cfg.get("TARGET_DECREASE_HYSTERESIS_SOC", 2.0))
+            result.update(night_active=False,inverter_on=True,dawn=night,
+                          solar_export_priority=False, soc_buffer_active=False,
+                          predictive_buffer_due=False, buffer_required_kwh=0,
+                          buffer_first_pressure_at=None, buffer_protected_soc=None,
+                          wake_at=None,discharge_start_at=None,discharge_deadline=None,
+                          required_headroom_kwh=0,standby_saved_kwh=0)
+            if night:
+                result.update(night)
+                result["useful_headroom_kwh"] = night["required_headroom_kwh"]
+            else:
+                result.update(day_dispatch(slots,now,soc,active_policy))
+                previous = getattr(self, "_horizon_result", {})
+                result = daytime_buffer(result, slots, now, soc, active_policy,
+                    connected=connected,
+                    export_floor=self.get_optional_sensor_float(sensors["daytime_export_floor"]),
+                    already_buffering=(previous.get("valid") is True and
+                        previous.get("soc_buffer_active") is True),
+                    previous_cutoff=previous.get("cutoff_soc"),
+                    execution_minutes=profile.get("HEADROOM_EXECUTION_MINUTES", 5),
+                    extra_headroom_soc=profile.get("EXTRA_HEADROOM_SOC", 0),
+                    charge_acceptance_kw=acceptance, production_on=production)
+                if result["solar_export_priority"] and not result["export_now"]:
+                    result["reason"] = "Dienos PV: namai → leistinas eksportas → baterija; vietos rezervas saugomas"
+            result.update(preferred_soc_min=active_policy.comfort_soc,
+                          preferred_soc_max=active_policy.storage_ceiling,
+                          grid_connected=connected, charge_acceptance_kw=acceptance)
+            if not connected:
+                result.update(export_now=False, solar_export_priority=False,
+                              soc_buffer_active=False, inverter_on=True,
+                              reason="Tinklo buvimas nepatvirtintas; eksportas ir nakties išjungimas uždrausti")
+            result.update(model_export_limit_kw=active_policy.export_kw,
+                          model_charge_kw=active_policy.charge_kw,
+                          model_discharge_kw=active_policy.discharge_kw,
+                          pv_adjustment=round(pv_ratio, 3),
+                          consumption_adjustment=round(load_ratio, 3),
+                          consumption_model='hybrid_v5' if hybrid else 'legacy',
+                          consumption_nowcast_active=getattr(load_at, 'active_projection', False),
+                          consumption_appliance_plans=getattr(load_at, 'appliance_count', 0),
+                          consumption_tomorrow_adjustment=round(tomorrow_ratio, 3),
+                          expected_pv_so_far_kwh=round(expected_pv, 2),
+                          actual_pv_so_far_kwh=pv_actual,
+                          expected_load_so_far_kwh=round(expected_load, 2),
+                          actual_load_so_far_kwh=consumption_actual)
+            return result
+
+        def publish_night_economics(self):
+            """Expose the same actionable schedule consumed by Planner."""
+            result = self.horizon_guidance(self.get_optional_float("soc"))
+            night = result.get("dawn") or {}
+            attrs = {"friendly_name": f"{label}: nakties planas",
+                     "icon":"mdi:power-sleep", "model_version":VERSION,
+                     "idle_w":profile["INVERTER_IDLE_W"],
+                     "isjungto_w":profile["INVERTER_OFF_W"],
+                     "sutaupyta_savivarta_kwh":night.get("standby_saved_kwh",0),
+                     "namai_is_tinklo_kwh":night.get("sleep_grid_import_kwh",0),
+                     "power_control_available":profile["INVERTER_CONTROL_AVAILABLE"],
+                     "kaina_ijungtas_eur_h":None,"kaina_isjungtas_eur_h":None,
+                     "skirtumas_eur_h":None,"sutaupymas_nakti_eur":None,
+                     "baterijos_kwh_verte":None,
+                     **night}
+            self.set_state(output["night_economics"],state=result["reason"][:254],
+                           attributes=ha_attributes(attrs))
+            sleeping = result.get("night_active") and not result.get("inverter_on",True)
+            self.set_state(output["shutdown_eta"],state="dabar" if sleeping else "—",
+                attributes=ha_attributes({"friendly_name":f"{label}: inverterio išjungimas",
+                    "reason":result["reason"],"tikslinis_soc":self.last_target_soc}))
+            if night.get("wake_at"):
+                self.set_state(output["morning_on_time"],state=night["wake_at"],
+                    attributes={"friendly_name":f"{label}: inverterio įjungimas",
+                        "device_class":"timestamp","pv_start_at":night["pv_start_at"],
+                        "reason":night["reason"]})
+            self.set_state(output["cons_until_production"],
+                state=str(round(night.get("natural_discharge_if_on_kwh",0)*policy.discharge_eff,3)),
+                attributes={"friendly_name":f"{label}: vartojimas iki gamybos įjungus inverterį",
+                    "unit_of_measurement":"kWh","state_class":"measurement",
+                    "reason":"Miegant namai maitinami iš tinklo; iki 30 W likutinės sąnaudos įtrauktos baterijai"})
+            self.set_state(output["correction_factor"],
+                state=str(round(self.correction.get("factor",1),3)),
+                attributes=ha_attributes({"friendly_name":f"{label}: Solcast korekcija",
+                    "dienos":self.correction.get("days",0),
+                    "atnaujinta":self.correction.get("updated"),
+                    "valandiniai":self.correction.get("hourly_factors",{}),
+                    "valandiniu_dienos":self.correction.get("hourly_days",0)}))
+
+        def publish_realization(self):
+            result = self.horizon_guidance(self.get_optional_float("soc"))
+            value = result.get("useful_headroom_kwh", 0.0)
+            self.set_state(output["room_shortfall"], state=str(value), attributes={
+                "friendly_name": f"{label}: vietos poreikis pagal perspektyvą",
+                "unit_of_measurement": "kWh", "state_class": "measurement",
+                "model_version": VERSION, "valid": "on" if result["valid"] else "off",
+                "reason": result["reason"], "horizon_hours": result.get("horizon_hours", 0),
+            })
+
+    return HorizonMixin

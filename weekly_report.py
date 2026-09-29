@@ -27,59 +27,15 @@ import json
 import os
 
 
-# ============================================================
-#  KONFIGŪRACIJA
-# ============================================================
+from energy_system.site_registry import get_site
 
-# Fallback kainos — realios skaitomos iš input_number.electricity_price_buy/
-# sell (dashboard), šios naudojamos tik kol input_number nenustatytas.
-ELECTRICITY_PRICE_BUY  = 0.18   # €/kWh — kaina perkant iš tinklo
-ELECTRICITY_PRICE_SELL = 0.08   # €/kWh — kaina parduodant į tinklą
-
-# Kelias per __file__ — AppDaemon konteineryje /config rodo į addon'o vidinį
-# katalogą, todėl hardcoded /config/appdaemon/... ten neegzistuoja.
-REPORT_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weekly_reports.json")
-
-# HA persistent notifications (Telegram nesukonfigūruotas; atsiradus — pakeisti čia)
-NOTIFY_SERVICE = "notify/persistent_notification"
-
-# Ekvivalentiniai ciklai = bendra įkrovos energija / naudingoji talpa.
-# 14.4 = 16 kWh × 90% (ruožas 10–100%; BMS fizinis dugnas 10%, 2026-07-14) —
-# suderinta su energy_manager.py ir sensor.battery_equivalent_cycles.
-BATTERY_USABLE_KWH = 14.4
-
-SENSOR = {
-    # Savaitiniai utility meter'iai (configuration.yaml → utility_meter:,
-    # šaltiniai — Solis Modbus total skaitliukai; resetinasi pirmadienį 00:00)
-    "pv_week":         "sensor.energy_pv_week",
-    "grid_buy_week":   "sensor.energy_grid_buy_week",
-    "grid_sell_week":  "sensor.energy_grid_sell_week",
-    "house_week":      "sensor.energy_house_week",
-    # Boilerio dar nėra (ESP32 neprijungtas) — kol entity neegzistuoja, bus 0
-    "boiler_week":     "sensor.energy_boiler_week",
-    # Solcast savaitės prognozės sensoriaus nėra — tikslumo eilutė praleidžiama
-    "solcast_week":    "sensor.solcast_forecast_this_week",
-    "soc":             "sensor.solis_s6_eh3p_battery_soc",
-    "total_charge":    "sensor.solis_s6_eh3p_total_battery_charge_energy",
-}
-
-# Dienos suvestinei — tiesiogiai Solis Modbus dienos skaitliukai
-DAILY_SENSOR = {
-    "pv":     "sensor.solis_s6_eh3p_pv_today_energy_generation",
-    "house":  "sensor.solis_s6_eh3p_household_load_today_energy",
-    "sell":   "sensor.solis_s6_eh3p_today_energy_fed_into_grid",
-    "buy":    "sensor.solis_s6_eh3p_today_energy_imported_from_grid",
-    "boiler": "sensor.energy_boiler_today",   # ESP32 ateičiai; kol nėra — 0
-}
-
-
-# ============================================================
-#  KLASĖ
-# ============================================================
 
 class WeeklyReport(hass.Hass):
 
     def initialize(self):
+        site = get_site(self.args["site"])
+        self.profile = site["weekly_report"]
+        self.site_label = site["energy"]["SITE_LABEL"]
         self.log("WeeklyReport paleidžiamas...")
 
         self.reports = self.load_reports()
@@ -100,7 +56,7 @@ class WeeklyReport(hass.Hass):
 
     def get_float(self, key, default=0.0):
         try:
-            val = self.get_state(SENSOR[key])
+            val = self.get_state(self.profile["SENSOR"][key])
             if val in (None, "unavailable", "unknown"):
                 return default
             return float(val)
@@ -119,15 +75,15 @@ class WeeklyReport(hass.Hass):
             return default
 
     def price_buy(self):
-        return self._price("input_number.electricity_price_buy", ELECTRICITY_PRICE_BUY)
+        return self._price(self.profile["PRICE_BUY_ENTITY"], self.profile["ELECTRICITY_PRICE_BUY"])
 
     def price_sell(self):
-        return self._price("input_number.electricity_price_sell", ELECTRICITY_PRICE_SELL)
+        return self._price(self.profile["PRICE_SELL_ENTITY"], self.profile["ELECTRICITY_PRICE_SELL"])
 
     def load_reports(self):
         try:
-            if os.path.exists(REPORT_FILE):
-                with open(REPORT_FILE, "r") as f:
+            if os.path.exists(self.profile["REPORT_FILE"]):
+                with open(self.profile["REPORT_FILE"], "r") as f:
                     return json.load(f)
         except Exception as e:
             self.log(f"Ataskaitų įkėlimo klaida: {e}")
@@ -135,14 +91,14 @@ class WeeklyReport(hass.Hass):
 
     def save_reports(self):
         try:
-            with open(REPORT_FILE, "w") as f:
+            with open(self.profile["REPORT_FILE"], "w") as f:
                 json.dump(self.reports[-52:], f, indent=2)  # palikti metų ataskaitas
         except Exception as e:
             self.log(f"Ataskaitų išsaugojimo klaida: {e}")
 
     def send_message(self, message, title="Energijos ataskaita"):
         try:
-            self.call_service(NOTIFY_SERVICE, title=title, message=message)
+            self.call_service(self.profile["NOTIFY_SERVICE"], title=title, message=message)
             self.log(f"Pranešimas išsiųstas: {title}")
         except Exception as e:
             self.log(f"Pranešimo klaida: {e}", level="WARNING")
@@ -183,7 +139,7 @@ class WeeklyReport(hass.Hass):
         solcast_pred = self.get_float("solcast_week")
         soc          = self.get_float("soc")
         total_charge = self.get_float("total_charge")
-        cycles       = total_charge / BATTERY_USABLE_KWH if total_charge > 0 else 0
+        cycles       = total_charge / self.profile["BATTERY_USABLE_KWH"] if total_charge > 0 else 0
 
         # Finansinis skaičiavimas. Savo reikmėms panaudota saulė = PV − parduota
         # (parduotoji vertinama pardavimo kaina žemiau — kitaip eksportuota kWh
@@ -261,11 +217,11 @@ class WeeklyReport(hass.Hass):
         Siunčia tik jei generacija buvo reikšminga (>1 kWh).
         """
         # Solis Modbus dienos skaitliukai
-        pv_today     = self._get_today(DAILY_SENSOR["pv"])
-        house_today  = self._get_today(DAILY_SENSOR["house"])
-        sell_today   = self._get_today(DAILY_SENSOR["sell"])
-        buy_today    = self._get_today(DAILY_SENSOR["buy"])
-        boiler_today = self._get_today(DAILY_SENSOR["boiler"])
+        pv_today     = self._get_today(self.profile["DAILY_SENSOR"]["pv"])
+        house_today  = self._get_today(self.profile["DAILY_SENSOR"]["house"])
+        sell_today   = self._get_today(self.profile["DAILY_SENSOR"]["sell"])
+        buy_today    = self._get_today(self.profile["DAILY_SENSOR"]["buy"])
+        boiler_today = self._get_today(self.profile["DAILY_SENSOR"]["boiler"])
         soc          = self.get_float("soc")
 
         if pv_today < 0.5:
