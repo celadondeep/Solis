@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 from math import ceil, isfinite
 from energy_system.consumption_forecast import integrate
 
-VERSION = "4.4-command-recovery"
+VERSION = "4.5-two-stage-night"
 
 
 def ha_attributes(value):
