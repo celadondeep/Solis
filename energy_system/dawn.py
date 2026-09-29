@@ -180,11 +180,9 @@ The export ceiling is shared with PV and never added on top of PV export.
     morning_kwh = split_kwh-evening_kwh
     split_enabled = evening_kwh >= minimum_phase_kwh and morning_kwh >= minimum_phase_kwh
     current_local = now.astimezone(local_dawn.tzinfo)
-    quiet = current_local.replace(hour=int(evening_quiet_hour),
+    quiet = (local_dawn-timedelta(days=1)).replace(hour=int(evening_quiet_hour),
                                   minute=round((evening_quiet_hour%1)*60),
                                   second=0, microsecond=0)
-    if quiet <= current_local:
-        quiet += timedelta(days=1)
     previous_evening_target = finite(prior.get('evening_target_soc')) if same_night else None
     if same_night and previous_evening_target is not None:
         evening_target = max(budget['target_soc'], previous_evening_target)
@@ -213,6 +211,23 @@ The export ceiling is shared with PV and never added on top of PV export.
             remaining -= duration*drain_kw
             ideal_start = stamp(s.start)+timedelta(hours=s.hours-duration)
     feasible = remaining <= 0.02
+    morning_start = ideal_start
+    if split_enabled and not evening_done and quiet < local_dawn:
+        morning_remaining = max(0, (evening_target-budget['target_soc'])*policy.kwh_per_soc
+                                - off_kw*(dawn-stamp(quiet)).total_seconds()/3600)
+        morning_start = None
+        for s in reversed(take_slots(slots, quiet, dawn)):
+            natural_kw = min(policy.discharge_kw,max(0,s.load-s.pv))
+            export_kw = min(max(0,policy.export_kw-max(0,s.pv-s.load)),
+                            max(0,policy.discharge_kw-natural_kw))
+            drain_kw = max(0,(natural_kw+export_kw)/policy.discharge_eff-off_kw) \
+                if power_control else export_kw/policy.discharge_eff
+            if morning_remaining > 1e-8 and drain_kw > 0:
+                duration = min(s.hours,morning_remaining/drain_kw)
+                morning_remaining -= duration*drain_kw
+                morning_start = stamp(s.start)+timedelta(hours=s.hours-duration)
+    if morning_start is not None:
+        morning_start = max(now_utc, morning_start-timedelta(minutes=execution_margin_minutes))
     # The evening stage uses its own fixed SOC cutoff and must end at quiet
     # time. The remaining energy is recalculated from actual SOC for dawn.
     phase = 'morning'
@@ -277,6 +292,7 @@ The export ceiling is shared with PV and never added on top of PV export.
                 evening_done=evening_done or (phase == 'evening' and not due),
                 pv_start_at=local_dawn.isoformat(),
                 discharge_start_at=start.astimezone(now.tzinfo).isoformat() if start else None,
+                morning_planned_start_at=morning_start.astimezone(now.tzinfo).isoformat() if morning_start else None,
                 discharge_deadline=local_dawn.isoformat(),
                 wake_at=wake.astimezone(now.tzinfo).isoformat(),
                 required_discharge_kwh=round(needed,3),
