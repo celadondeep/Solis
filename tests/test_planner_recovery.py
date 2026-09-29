@@ -69,15 +69,25 @@ class NightRegressionTests(unittest.TestCase):
                       0 if i < 19 or i > 40 else 3, 0 if i < 19 or i > 40 else 2, .3)
                       for i in range(52)]
 
-    def test_committed_night_discharge_does_not_sleep_again_as_soc_falls(self):
-        sleeping=plan_dawn(self.slots,self.now,47,self.policy,execution_margin_minutes=30)
-        self.assertFalse(sleeping['export_now'])
-        ongoing=plan_dawn(self.slots,self.now,47,self.policy,execution_margin_minutes=30,
-                          discharge_committed=True)
-        self.assertTrue(ongoing['export_now'])
-        self.assertTrue(ongoing['inverter_on'])
-        at_target=plan_dawn(self.slots,self.now,ongoing['target_soc'],self.policy,
-                           discharge_committed=True)
+    def test_evening_stage_finishes_then_waits_for_the_morning_stage(self):
+        evening=plan_dawn(self.slots,self.now,47,self.policy,execution_margin_minutes=30)
+        self.assertTrue(evening['export_now'])
+        self.assertEqual(evening['discharge_phase'],'evening')
+        self.assertGreater(evening['cutoff_soc'],evening['target_soc'])
+        at_evening_target=plan_dawn(
+            self.slots,self.now,evening['evening_target_soc'],self.policy,
+            execution_margin_minutes=30,previous_plan=evening)
+        self.assertFalse(at_evening_target['export_now'])
+        self.assertFalse(at_evening_target['inverter_on'])
+        self.assertEqual(at_evening_target['discharge_phase'],'morning')
+        # Once morning export has actually been committed, a falling SOC must
+        # not move the start time back into the future and put the inverter to sleep.
+        morning=plan_dawn(self.slots,self.now,47,self.policy,execution_margin_minutes=30,
+                          previous_plan=at_evening_target,discharge_committed=True)
+        self.assertTrue(morning['export_now'])
+        self.assertTrue(morning['inverter_on'])
+        at_target=plan_dawn(self.slots,self.now,morning['target_soc'],self.policy,
+                           previous_plan=morning,discharge_committed=True)
         self.assertFalse(at_target['export_now'])
 
     def test_no_grid_never_shuts_down_even_at_hard_floor(self):
