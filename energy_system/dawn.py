@@ -22,24 +22,42 @@ def take_slots(slots, left, right):
 
 
 def morning_budget(day, policy, export_floor_soc=None):
-    """Largest dawn SOC with no additional avoidable capacity clipping.
+    """Choose dawn headroom from the central forecast; report P10 risk too.
 
-The minimum retains the P10 dawn-to-net-production deficit and a small
-margin. A second cloudy evening cannot demand an 80% reserve at dawn and
-thereby veto all useful headroom. P10 full-day outcomes remain diagnostic.
+The operational target uses expected dawn-to-net-production deficit plus a
+margin. P10 remains visible as a cloudy-case risk metric, but cannot by itself
+raise the dawn target enough to cancel all useful discharge.
 """
     deficit = peak_deficit = 0.0
+    p10_deficit = p10_peak_deficit = 0.0
+    central_repaid = p10_repaid = False
     for slot in day:
-        net = slot.low_pv - slot.load
-        if net >= 0:
-            deficit -= min(net, policy.charge_kw)*slot.hours*policy.charge_eff
-        else:
-            deficit += min(-net, policy.discharge_kw)*slot.hours/policy.discharge_eff
-        peak_deficit = max(peak_deficit, deficit)
-        if net > 0 and deficit <= 0:
-            break
-    floor_energy = max(0, ((export_floor_soc or policy.hard_floor)-policy.hard_floor)*policy.kwh_per_soc)
+        # The central forecast determines useful dawn headroom. P10 is kept
+        # as a risk estimate below; treating it as the mandatory SOC target
+        # can veto all discharge on days where the low case never recovers.
+        net = slot.pv - slot.load
+        p10_net = slot.low_pv - slot.load
+        if not central_repaid:
+            if net >= 0:
+                deficit -= min(net, policy.charge_kw)*slot.hours*policy.charge_eff
+            else:
+                deficit += min(-net, policy.discharge_kw)*slot.hours/policy.discharge_eff
+            peak_deficit = max(peak_deficit, deficit)
+            if net > 0 and deficit <= 0:
+                central_repaid = True
+        if not p10_repaid:
+            if p10_net >= 0:
+                p10_deficit -= min(p10_net, policy.charge_kw)*slot.hours*policy.charge_eff
+            else:
+                p10_deficit += min(-p10_net, policy.discharge_kw)*slot.hours/policy.discharge_eff
+            p10_peak_deficit = max(p10_peak_deficit, p10_deficit)
+            if p10_net > 0 and p10_deficit <= 0:
+                p10_repaid = True
+    operating_floor = max(policy.hard_floor, policy.comfort_soc,
+                          finite(export_floor_soc, policy.hard_floor))
+    floor_energy = max(0, (operating_floor-policy.hard_floor)*policy.kwh_per_soc)
     minimum = clamp(max(floor_energy, peak_deficit + policy.reserve_margin_kwh), 0, policy.capacity)
+    p10_minimum = clamp(max(floor_energy, p10_peak_deficit + policy.reserve_margin_kwh), 0, policy.capacity)
     best = simulate(day, minimum, policy,pv_priority=True)
     full = simulate(day, policy.capacity, policy,pv_priority=True)
     lo, hi = minimum, policy.capacity
@@ -59,6 +77,8 @@ thereby veto all useful headroom. P10 full-day outcomes remain diagnostic.
     cautious = simulate(day, target_energy, policy, low=True)
     return dict(target_soc=target_soc, target_energy=target_energy,
                 reserve_soc=ceil(policy.hard_floor+minimum/policy.kwh_per_soc),
+                p10_reserve_soc=ceil(policy.hard_floor+p10_minimum/policy.kwh_per_soc),
+                p10_reserve_gap_kwh=round(max(0,p10_minimum-minimum),3),
                 required_headroom_kwh=round(max(0,policy.capacity-target_energy),3),
                 day_pv_kwh=round(sum(s.pv*s.hours for s in day),3),
                 day_load_kwh=round(sum(s.load*s.hours for s in day),3),
@@ -87,7 +107,9 @@ def plan_dawn(slots, now, soc, policy, *, production_on=False,
               pv_threshold_kw=0.1, wake_margin_minutes=30,
               execution_margin_minutes=5, min_sleep_minutes=20,
               already_exporting=False, power_on=True, export_floor_soc=None,
-              discharge_committed=False):
+              discharge_committed=False, previous_plan=None,
+              evening_fraction=0.4, evening_quiet_hour=23.0,
+              minimum_phase_kwh=1.0):
     """Recompute an explicit target/start/deadline from current SOC.
 
 When power control is available the inverter sleeps until the latest
@@ -99,8 +121,11 @@ The export ceiling is shared with PV and never added on top of PV export.
     if finite(soc) is None or not 0 <= soc <= 100:
         raise ValueError('invalid dawn SOC')
     if any(finite(v) is None or v < 0 for v in (idle_kw,off_kw,pv_threshold_kw,
-            wake_margin_minutes,execution_margin_minutes,min_sleep_minutes)):
+            wake_margin_minutes,execution_margin_minutes,min_sleep_minutes,
+            evening_quiet_hour,minimum_phase_kwh)):
         raise ValueError('invalid night policy')
+    if finite(evening_fraction) is None or not 0 < evening_fraction < 1:
+        raise ValueError('evening_fraction must be between 0 and 1')
     if production_on:
         return None
     now_utc = stamp(now)
@@ -116,6 +141,18 @@ The export ceiling is shared with PV and never added on top of PV export.
     if not day or stamp(day[-1].start)+timedelta(hours=day[-1].hours) < stamp(end)-timedelta(seconds=1):
         raise ValueError('incomplete next solar day')
     budget = morning_budget(day,policy,export_floor_soc)
+    prior = previous_plan if isinstance(previous_plan, dict) else {}
+    prior_date = prior.get('night_plan_date')
+    same_night = prior_date == local_dawn.date().isoformat()
+    if same_night:
+        # Keep a night target stable when a fresh, pessimistic forecast arrives
+        # after sunset. A better forecast may release more headroom; a worse
+        # one cannot cancel a target already committed to the inverter.
+        locked_target = finite(prior.get('night_plan_target_soc'))
+        if locked_target is not None:
+            budget['target_soc'] = min(budget['target_soc'], max(policy.hard_floor, locked_target))
+            budget['target_energy'] = (budget['target_soc']-policy.hard_floor)*policy.kwh_per_soc
+            budget['required_headroom_kwh'] = round(max(0,policy.capacity-budget['target_energy']),3)
     night = take_slots(slots,now_utc,dawn)
     energy = max(0,(soc-policy.hard_floor)*policy.kwh_per_soc)
     target = budget['target_energy']
@@ -123,6 +160,31 @@ The export ceiling is shared with PV and never added on top of PV export.
     needed = max(0,energy-target)
     off_drain = off_kw*sum(s.hours for s in night) if power_control else 0
     forced = max(0,needed-off_drain) if power_control else max(0,needed-natural)
+    split_kwh = max(0.0, needed)
+    evening_kwh = split_kwh*evening_fraction
+    morning_kwh = split_kwh-evening_kwh
+    split_enabled = evening_kwh >= minimum_phase_kwh and morning_kwh >= minimum_phase_kwh
+    current_local = now.astimezone(local_dawn.tzinfo)
+    quiet = current_local.replace(hour=int(evening_quiet_hour),
+                                  minute=round((evening_quiet_hour%1)*60),
+                                  second=0, microsecond=0)
+    if quiet <= current_local:
+        quiet += timedelta(days=1)
+    previous_evening_target = finite(prior.get('evening_target_soc')) if same_night else None
+    if same_night and previous_evening_target is not None:
+        evening_target = max(budget['target_soc'], previous_evening_target)
+        split_enabled = prior.get('night_split_enabled') in (True, 'on', 'true')
+    else:
+        evening_target = max(budget['target_soc'], ceil(soc-evening_kwh/policy.kwh_per_soc))
+    evening_done = bool(same_night and prior.get('evening_done') in (True, 'on', 'true'))
+    # An achieved target is recoverable from current SOC too, so a restart
+    # between polling cycles cannot start the same evening stage again.
+    if split_enabled and soc <= evening_target+0.5:
+        evening_done = True
+    evening_window = (split_enabled and not evening_done
+                      and current_local.date() < local_dawn.date()
+                      and current_local.hour + current_local.minute/60 < evening_quiet_hour
+                      and current_local.hour >= 12)
     remaining = forced
     ideal_start = None
     for s in reversed(night):
@@ -137,22 +199,34 @@ The export ceiling is shared with PV and never added on top of PV export.
             remaining -= duration*drain_kw
             ideal_start = stamp(s.start)+timedelta(hours=s.hours-duration)
     feasible = remaining <= 0.02
-    # Explicit zero export limit must never activate TOU.
-    planned = forced >= (0.05 if already_exporting or discharge_committed else policy.start_kwh) and policy.export_kw > 0
-    start = max(now_utc,ideal_start-timedelta(minutes=execution_margin_minutes)) if planned and ideal_start else None
-    wake = max(now_utc,dawn-timedelta(minutes=wake_margin_minutes))
-    if start:
-        wake = min(wake,start)
-    # If waking for solar before a short discharge window, its household drain
-    # creates some headroom too. Recompute at wake/SOC changes; the hardware
-    # cutoff is the final dawn target, never a moving 0.75 kWh burst.
-    due = bool(planned and (discharge_committed or start and start <= now_utc+timedelta(seconds=1))
-               and soc > budget['target_soc']+0.5)
-    if due:
-        # Once the current night's discharge was committed, falling SOC must
-        # not move its calculated start into the future and put it back to sleep.
-        wake = now_utc
+    # The evening stage uses its own fixed SOC cutoff and must end at quiet
+    # time. The remaining energy is recalculated from actual SOC for dawn.
+    phase = 'morning'
+    if evening_window and policy.export_kw > 0:
+        phase = 'evening'
+        planned = True
         start = now_utc
+        due = soc > evening_target+0.5
+        if due:
+            wake = now_utc
+    else:
+        # Explicit zero export limit must never activate TOU.
+        planned = forced >= (0.05 if already_exporting or discharge_committed else policy.start_kwh) and policy.export_kw > 0
+        start = max(now_utc,ideal_start-timedelta(minutes=execution_margin_minutes)) if planned and ideal_start else None
+        # If waking for solar before a short discharge window, its household drain
+        # creates some headroom too. Recompute at wake/SOC changes; the hardware
+        # cutoff is the final dawn target, never a moving 0.75 kWh burst.
+        due = bool(planned and (discharge_committed or start and start <= now_utc+timedelta(seconds=1))
+                   and soc > budget['target_soc']+0.5)
+        if due:
+            # Once the current night's discharge was committed, falling SOC must
+            # not move its calculated start into the future and put it back to sleep.
+            wake = now_utc
+            start = now_utc
+    if phase != 'evening':
+        wake = max(now_utc,dawn-timedelta(minutes=wake_margin_minutes))
+        if start:
+            wake = min(wake,start)
     wait_seconds = (wake-now_utc).total_seconds()
     can_sleep = power_control and wait_seconds > 1 and (
         not power_on or wait_seconds >= min_sleep_minutes*60)
@@ -162,7 +236,10 @@ The export ceiling is shared with PV and never added on top of PV export.
     standby_saved = max(0,idle_kw-off_kw)*sleep_hours
     house_grid = sum(max(0,s.load-idle_kw)*s.hours for s in off_slots)
     if due:
-        reason = f"Iškrovimas prieš rytą iki {budget['target_soc']}%, baigti iki {local_dawn:%H:%M}"
+        if phase == 'evening':
+            reason = f"Vakarinis etapas iki {evening_target}%; sustabdyti iki {quiet:%H:%M}, ryto tikslas {budget['target_soc']}%"
+        else:
+            reason = f"Iškrovimas prieš rytą iki {budget['target_soc']}%, baigti iki {local_dawn:%H:%M}"
     elif can_sleep:
         reason = (f"Nakties miegas; įjungti {wake.astimezone(now.tzinfo):%H:%M}, "
                   f"ryto tikslas {budget['target_soc']}% / {budget['required_headroom_kwh']:.1f} kWh vietos")
@@ -172,7 +249,17 @@ The export ceiling is shared with PV and never added on top of PV export.
         reason += f"; iki termino gali trūkti {remaining:.2f} kWh vietos"
     return dict(**budget, state=state, reason=reason, night_active=True,
                 inverter_on=not can_sleep, export_now=due,
-                cutoff_soc=budget['target_soc'],
+                cutoff_soc=evening_target if phase == 'evening' else budget['target_soc'],
+                discharge_phase=phase,
+                night_plan_date=local_dawn.date().isoformat(),
+                night_plan_target_soc=budget['target_soc'],
+                night_split_enabled=split_enabled,
+                night_split_total_kwh=round(split_kwh,3),
+                evening_kwh=round(evening_kwh if split_enabled else 0,3),
+                morning_kwh=round(morning_kwh if split_enabled else split_kwh,3),
+                evening_target_soc=evening_target if split_enabled else None,
+                evening_quiet_at=quiet.isoformat(),
+                evening_done=evening_done or (phase == 'evening' and not due),
                 pv_start_at=local_dawn.isoformat(),
                 discharge_start_at=start.astimezone(now.tzinfo).isoformat() if start else None,
                 discharge_deadline=local_dawn.isoformat(),
