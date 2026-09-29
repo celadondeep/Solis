@@ -125,6 +125,7 @@
       "morning_on_time": "sensor.inverter_morning_on_time_eimo",
       "cons_until_production": "sensor.energy_manager_eimo_cons_until_production",
       "correction_factor": "sensor.solcast_correction_factor_eimo",
+      "forecast_accuracy": "sensor.solcast_forecast_yesterday_accuracy_eimo",
       "plan_mode": "sensor.eimo_plan_mode",
       "plan_target_soc": "sensor.eimo_plan_target_soc",
       "plan_slot_active": "sensor.eimo_plan_slot_active",
@@ -286,6 +287,7 @@
     "soc": {
       "$ref": "energy.SENSOR.soc"
     },
+    "badge_soc": "sensor.eimo_baterijos_ikrova_skydelyje",
     "pv": {
       "$ref": "energy.SENSOR.pv_power"
     },
@@ -370,8 +372,8 @@
     "analysis": {
       "today": {
         "savings": "sensor.energy_savings_today_eimo",
-        "consumption": {
-          "$ref": "energy.SENSOR.consumption_today"
+      "consumption": {
+          "$ref": "energy.CONSUMPTION_DAILY_SENSOR"
         },
         "import": "sensor.solis_inverter_1033300254190112_solis_daily_grid_energy_purchased",
         "export": "sensor.solis_inverter_1033300254190112_solis_daily_on_grid_energy"
@@ -451,7 +453,7 @@
         ],
         [
           {
-            "$ref": "energy.SENSOR.consumption_today"
+          "$ref": "energy.CONSUMPTION_DAILY_SENSOR"
           },
           "Suvartota",
           "#f44336"
@@ -477,8 +479,8 @@
       "battery_efficiency": {
         "$ref": "dashboard.analysis.efficiency.0.0"
       },
-      "forecast_accuracy": null,
-      "forecast_note": "Eimo 30 d. prognozės tikslumo grafikas bus įjungtas, kai bus sukauptas atskiras vakarykštės Eimo gamybos faktas.",
+      "forecast_accuracy": "sensor.solcast_forecast_yesterday_accuracy_eimo",
+      "forecast_note": "Eimo prognozės tikslumas skaičiuojamas iš 04:40 užfiksuotos prognozės ir faktinės dienos gamybos. Grafikas pildomas kasdien 23:50.",
       "quality": {
         "state": {
           "$ref": "power_quality.outputs.state"
