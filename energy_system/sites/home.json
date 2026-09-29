@@ -150,6 +150,7 @@
       "plan_inverter_on": "sensor.solis_plan_inverter_on",
       "plan": "sensor.solis_plan",
       "horizon": "sensor.solis_energy_horizon",
+      "night_state": "input_text.namai_nakties_atmintis",
       "planner_health": "sensor.solis_planner_health",
       "executor_health": "sensor.solis_executor_health",
       "core_state": "sensor.solis_core_state",

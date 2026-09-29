@@ -1,5 +1,6 @@
 """HA input adapter for the shared forward energy model; no actuator writes."""
 from datetime import datetime, timedelta
+import json
 from time import monotonic
 from zoneinfo import ZoneInfo
 from dataclasses import replace
@@ -27,6 +28,40 @@ def _night_plan_memory(value):
     if not memory.get("night_plan_date") or not memory.get("pv_start_at"):
         return None
     return memory
+
+
+def _decode_night_plan_state(raw):
+    """Decode compact persistent helper data; tolerate empty/old values."""
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            return None
+        keys = {
+            "d": "night_plan_date", "t": "night_plan_target_soc",
+            "e": "evening_target_soc", "s": "night_split_enabled",
+            "v": "evening_done", "p": "discharge_phase",
+            "c": "discharge_committed", "l": "discharge_deadline",
+            "r": "pv_start_at", "a": "calculated_at",
+        }
+        expanded = {target: data[source] for source, target in keys.items() if source in data}
+        return _night_plan_memory(expanded)
+    except (TypeError, ValueError):
+        return None
+
+
+def _encode_night_plan_state(memory, saved_at):
+    """Serialize night memory compactly for HA's 255-character input_text."""
+    if not isinstance(memory, dict):
+        return None
+    data = {
+        "d": memory.get("night_plan_date"), "t": memory.get("night_plan_target_soc"),
+        "e": memory.get("evening_target_soc"), "s": memory.get("night_split_enabled"),
+        "v": memory.get("evening_done"), "p": memory.get("discharge_phase"),
+        "c": memory.get("discharge_committed"), "l": memory.get("discharge_deadline"),
+        "r": memory.get("pv_start_at"), "a": saved_at,
+    }
+    raw = json.dumps(data, separators=(",", ":"), ensure_ascii=True)
+    return raw if len(raw) <= 255 else None
 
 
 def build_horizon_mixin(profile):
@@ -76,6 +111,16 @@ def build_horizon_mixin(profile):
             now = datetime.now(ZoneInfo(profile.get("TIMEZONE", "Europe/Vilnius")))
             previous = getattr(self, "_horizon_result", None)
             night_previous = getattr(self, "_night_plan_state", None)
+            night_state_entity = output.get("night_state")
+            if night_previous is None and night_state_entity:
+                try:
+                    helper = self._read_state_record(night_state_entity)
+                    night_previous = _decode_night_plan_state(helper.get("state"))
+                    if night_previous is not None:
+                        self._night_plan_state = night_previous
+                        self._night_plan_helper_value = helper.get("state")
+                except Exception:
+                    pass
             if previous is None or night_previous is None:
                 # AppDaemon may restart between the evening and dawn stages.
                 # The night-stage memory is independent of forecast validity,
@@ -145,6 +190,22 @@ def build_horizon_mixin(profile):
                 memory = _night_plan_memory(result)
                 if memory is not None:
                     self._night_plan_state = memory
+                    if night_state_entity:
+                        old = getattr(self, "_night_plan_helper_value", None)
+                        old_memory = _decode_night_plan_state(old)
+                        old_semantics = {k: v for k, v in (old_memory or {}).items() if k != "calculated_at"}
+                        new_semantics = {k: v for k, v in memory.items() if k != "calculated_at"}
+                        if old_semantics != new_semantics:
+                            raw = _encode_night_plan_state(memory, now.isoformat())
+                            if raw is not None:
+                                try:
+                                    self.call_service("input_text/set_value", entity_id=night_state_entity, value=raw)
+                                    self._night_plan_helper_value = raw
+                                    self._night_plan_state["calculated_at"] = now.isoformat()
+                                except Exception as exc:
+                                    self.log(f"[{site}] Nepavyko išsaugoti nakties etapo atminties: {exc}", level="WARNING")
+                            else:
+                                self.log(f"[{site}] Nakties atmintis netelpa į HA input_text", level="ERROR")
             if getattr(self, "_night_plan_state", None) is not None:
                 result["night_plan_memory"] = self._night_plan_state
             self._horizon_at = monotonic()

@@ -132,6 +132,7 @@
       "plan_inverter_on": "sensor.eimo_plan_inverter_on",
       "plan": "sensor.eimo_plan",
       "horizon": "sensor.eimo_energy_horizon",
+      "night_state": "input_text.eimo_nakties_atmintis",
       "planner_health": "sensor.eimo_planner_health",
       "executor_health": "sensor.eimo_executor_health",
       "core_state": "sensor.eimo_core_state",
