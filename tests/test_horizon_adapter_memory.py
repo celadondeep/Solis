@@ -125,6 +125,19 @@ class HorizonMemoryTests(unittest.TestCase):
         self.assertEqual(app.calls[0][0], "input_text/set_value")
         self.assertEqual(app.calls[0][1]["entity_id"], "input_text.night_memory")
 
+    def test_helper_events_override_stale_horizon_attributes_after_restart(self):
+        current = dict(self.memory, night_events=[12345678, 12345738, 0, 0, 0, 0, 0])
+        raw = _encode_night_plan_state(current, self.memory["calculated_at"])
+        stale = dict(self.memory, night_events=[0] * 7)
+        saved = {"state": "sleep", "attributes": {
+            "site": "eimo", "valid": "on", "night_active": "on",
+            "night_plan_memory": stale,
+        }}
+        app = self.make_app(saved=saved, valid=True)
+        app.states["input_text.night_memory"] = {"state": raw, "attributes": {}}
+        result = app.horizon_guidance(60)
+        self.assertEqual(result["night_events"][:2], current["night_events"][:2])
+
 
 if __name__ == "__main__":
     unittest.main()

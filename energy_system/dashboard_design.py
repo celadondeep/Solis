@@ -100,12 +100,24 @@ if(variables.kind === 'plan') {
     const step=(time,name,sub)=>`<div class="step"><div class="time">${esc(time)}</div><div><div class="step-title">${esc(name)}</div><div class="muted">${esc(sub)}</div></div></div>`;
     body+='<div class="steps">';
     const scheduled=[];
-    if(p.power) scheduled.push([h.wake_at,'Įjungti inverterį','Pagal iškrovimo arba gamybos pradžią']);
-    if(amount!==null && amount>0.02) scheduled.push([h.discharge_start_at,'Pradėti iškrovimą',`${fmt(amount)} kWh baterijos energijos`]);
-    else body+=num(h.unmet_headroom_kwh)>0.05 ? step('—','Iškrovimas nesuplanuotas','Turimi apribojimai neleidžia atlaisvinti visos vietos') : step('—','Papildomai iškrauti nereikia','Turimos vietos prognozuojamai saulei pakanka');
+    const split=on(h.night_split_enabled), eveningStarted=ts(h.evening_actual_start_at)!==null;
+    const morningStarted=ts(h.morning_actual_start_at)!==null;
+    if(split) {
+      if(eveningStarted) scheduled.push([h.evening_actual_start_at,'Vakarinis iškrovimas pradėtas',`${fmt(h.evening_kwh)} kWh etapo planas · faktinis laikas`]);
+      else if(h.discharge_phase==='evening') body+=step('Vyksta','Vakarinis iškrovimas','Tikslus pradžios laikas laukia inverterio patvirtinimo');
+      if(eveningStarted || on(h.evening_done)) scheduled.push([h.evening_actual_end_at || h.evening_quiet_at,ts(h.evening_actual_end_at)?'Vakarinis iškrovimas išjungtas':'Vakarinio etapo pabaiga',ts(h.evening_actual_end_at)?'Faktinis laikas':'Planuojamas / nepatvirtintas laikas']);
+      else scheduled.push([h.evening_quiet_at,'Išjungti vakarinį iškrovimą','Iki ryto saugoma likusi baterijos energija']);
+      if(ts(h.sleep_actual_start_at)) scheduled.push([h.sleep_actual_start_at,'Inverteris išjungtas','Faktinis nakties poilsio pradžios laikas']);
+    }
+    if(p.power) scheduled.push([morningStarted?h.morning_actual_start_at:h.wake_at,'Įjungti inverterį','Pagal iškrovimo arba gamybos pradžią']);
+    const morningTime=morningStarted?h.morning_actual_start_at:(h.morning_planned_start_at || (!split?h.discharge_start_at:null));
+    if(amount!==null && amount>0.02 && morningTime) scheduled.push([morningTime,morningStarted?'Rytinis iškrovimas pradėtas':'Pradėti rytinį iškrovimą',`${fmt(amount)} kWh likusios baterijos energijos · ${morningStarted?'faktinis':'planuojamas'} laikas`]);
+    else if(!split && amount!==null && amount>0.02 && on(h.export_now)) body+=step('Vyksta','Iškrovimas','Laukiama faktinio laiko patvirtinimo');
+    else if(!split && (amount===null || amount<=0.02)) body+=num(h.unmet_headroom_kwh)>0.05 ? step('—','Iškrovimas nesuplanuotas','Turimi apribojimai neleidžia atlaisvinti visos vietos') : step('—','Papildomai iškrauti nereikia','Turimos vietos prognozuojamai saulei pakanka');
+    if(ts(h.morning_actual_end_at)) scheduled.push([h.morning_actual_end_at,'Rytinis iškrovimas išjungtas','Faktinis laikas']);
     scheduled.sort((x,y)=>(ts(x[0])??Infinity)-(ts(y[0])??Infinity)).forEach(x=>{body+=step(clock(x[0]),x[1],x[2]);});
     body+=step(clock(h.pv_start_at),'Prasideda prognozuojama gamyba',`Baterijos viršutinė ryto riba ${fmt(h.target_soc,0)} %`);
-    body+='</div><div class="rows">'+row('Reikiama laisva vieta',fmt(h.required_headroom_kwh)+' kWh')+row('Sutaupoma inverterio sąnaudų',fmt(h.standby_saved_kwh,2)+' kWh')+'</div>';
+    body+='</div><div class="rows">'+row('Reikiama laisva vieta',fmt(h.required_headroom_kwh)+' kWh')+row('Jau sutaupyta išjungus inverterį',fmt(h.sleep_saved_actual_kwh,3)+' kWh')+row('Dar galima sutaupyti',fmt(h.standby_saved_kwh,2)+' kWh')+'</div>';
     if(num(h.unmet_headroom_kwh)>0.05) body+=`<div class="callout">Iki gamybos pradžios gali nepavykti atlaisvinti dar ${fmt(h.unmet_headroom_kwh)} kWh.</div>`;
     body+='<div class="foot muted">Ryto riba nereiškia, kad mažesnę įkrovą reikia papildyti iš tinklo.</div>';
   } else {
@@ -115,6 +127,7 @@ if(variables.kind === 'plan') {
     body+=`<p class="desc">${description}</p>`;
     body+='<div class="rows">'+row('Eksporto riba',fmt(h.model_export_limit_kw)+' kW')+row('Priverstinis iškrovimas',on(plan.slot_active)?'Aktyvus':'Išjungtas')+row('Plano SOC riba',fmt(plan.target_soc,0)+' %')+'</div>';
     body+='<div class="callout">Kitas nakties planas bus parodytas, kai modelis pereis į pasiruošimą rytui. Praėjusios nakties laikai nerodomi.</div>';
+    if(num(h.sleep_saved_actual_kwh)>0) body+='<div class="rows">'+row('Praėjusią naktį sutaupyta išjungus inverterį',fmt(h.sleep_saved_actual_kwh,3)+' kWh')+'</div>';
     body+=`<div class="foot muted">Planas atnaujintas ${esc(clock(plan.committed_at))}. Koreguojamas pagal gamybą ir vartojimą.</div>`;
   }
 }
@@ -298,7 +311,7 @@ def _view(p, title, path, icon, subtitle, sections):
                 "type": "markdown", "text_only": True,
                 "content": f"# {p['title']} · {title}\n{subtitle}",
             }},
-            "badges": [{"type": "entity", "entity": p["soc"], "name": "Baterija", "show_name": True, "color": "teal"}] + [
+            "badges": [{"type": "entity", "entity": p.get("badge_soc", p["soc"]), "name": "Baterija", "show_name": True, "color": "teal"}] + [
                 {"type": "entity", "entity": p["pv"], "name": peer["title"], "show_name": True, "show_state": False,
                  "icon": "mdi:swap-horizontal", "tap_action": {"action": "navigate", "navigation_path": f"/{peer['url']}/{peer.get('overview_path', 'energija') if path == 'energija' else path}"}}
                 for peer in p.get("navigation", [])],
