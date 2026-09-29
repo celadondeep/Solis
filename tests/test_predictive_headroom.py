@@ -172,7 +172,7 @@ class PredictiveHeadroomTests(unittest.TestCase):
         self.assertGreater(result['morning_kwh'],0)
         self.assertNotEqual(result['discharge_phase'],'evening')
 
-    def test_worsening_forecast_cannot_raise_locked_night_target(self):
+    def test_worsening_forecast_raises_target_and_stops_excess_discharge(self):
         now=self.now.replace(hour=22)
         slots=[]
         for i in range(60):
@@ -184,8 +184,29 @@ class PredictiveHeadroomTests(unittest.TestCase):
                'night_split_enabled':'on','evening_done':'off'}
         result=plan_dawn(slots,now,65,self.policy,evening_quiet_hour=21,
                          previous_plan=prior)
-        self.assertEqual(result['target_soc'],30)
-        self.assertGreater(result['p10_reserve_soc'],result['target_soc'])
+        self.assertGreater(result['target_soc'],prior['night_plan_target_soc'])
+        self.assertGreaterEqual(result['target_soc'],result['reserve_soc'])
+        self.assertEqual(result['required_discharge_kwh'],0)
+
+    def test_forecast_improvement_releases_headroom_after_two_soc_points(self):
+        now=self.now.replace(hour=22)
+        slots=[]
+        for i in range(60):
+            at=now+timedelta(minutes=30*i)
+            pv=2.5 if at.date()>now.date() and at.hour>=8 else 0
+            slots.append(Slot(at,.5,pv,pv*.65,.5))
+        dawn=next(i for i,s in enumerate(slots) if s.pv>=.1)
+        candidate=morning_budget(slots[dawn:],self.policy)['target_soc']
+        prior={'night_plan_date':(now.date()+timedelta(days=1)).isoformat(),
+               'night_plan_target_soc':min(77,candidate+1),
+               'evening_target_soc':70,'night_split_enabled':'on','evening_done':'on'}
+        held=plan_dawn(slots,now,82,self.policy,previous_plan=prior)
+        self.assertEqual(held['target_soc'],prior['night_plan_target_soc'])
+        prior['night_plan_target_soc']=min(77,candidate+2)
+        released=plan_dawn(slots,now,82,self.policy,previous_plan=prior)
+        self.assertEqual(released['target_soc'],candidate)
+        self.assertEqual(released['required_headroom_kwh'],
+                         round(max(0,self.policy.capacity-released['target_energy']),3))
 
     def test_quiet_time_ends_evening_stage_and_moves_remaining_need_to_dawn(self):
         now=self.now.replace(hour=23,minute=5)

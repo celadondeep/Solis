@@ -72,6 +72,7 @@ raise the dawn target enough to cancel all useful discharge.
                 hi = mid
     # Round upwards so quantisation never causes extra battery discharge.
     target_soc = min(ceil(policy.storage_ceiling), ceil(policy.hard_floor+lo/policy.kwh_per_soc))
+    target_soc = max(target_soc, ceil(policy.hard_floor+minimum/policy.kwh_per_soc))
     target_energy = (target_soc-policy.hard_floor)*policy.kwh_per_soc
     reference = simulate(day, target_energy, policy,pv_priority=True)
     cautious = simulate(day, target_energy, policy, low=True)
@@ -102,6 +103,19 @@ def day_dispatch(slots,now,soc,policy):
         day_dispatch="load_grid_battery" if priority else "load_battery_grid")
 
 
+def _retarget_budget(day, policy, budget, target_soc):
+    """Refresh all scenario metrics when night hysteresis holds a target."""
+    target_soc = int(clamp(ceil(target_soc), budget['reserve_soc'], ceil(policy.storage_ceiling)))
+    energy = (target_soc-policy.hard_floor)*policy.kwh_per_soc
+    central = simulate(day, energy, policy, pv_priority=True)
+    cautious = simulate(day, energy, policy, low=True)
+    return dict(budget, target_soc=target_soc, target_energy=energy,
+        required_headroom_kwh=round(max(0,policy.capacity-energy),3),
+        day_export_kwh=round(central['export_kwh'],3),
+        day_clipping_kwh=round(central['clipped_kwh'],3),
+        day_low_import_kwh=round(cautious['import_kwh'],3))
+
+
 def plan_dawn(slots, now, soc, policy, *, production_on=False,
               power_control=True, idle_kw=0.13, off_kw=0.03,
               pv_threshold_kw=0.1, wake_margin_minutes=30,
@@ -109,7 +123,7 @@ def plan_dawn(slots, now, soc, policy, *, production_on=False,
               already_exporting=False, power_on=True, export_floor_soc=None,
               discharge_committed=False, previous_plan=None,
               evening_fraction=0.4, evening_quiet_hour=23.0,
-              minimum_phase_kwh=1.0):
+              minimum_phase_kwh=1.0, target_decrease_hysteresis_soc=2.0):
     """Recompute an explicit target/start/deadline from current SOC.
 
 When power control is available the inverter sleeps until the latest
@@ -122,7 +136,7 @@ The export ceiling is shared with PV and never added on top of PV export.
         raise ValueError('invalid dawn SOC')
     if any(finite(v) is None or v < 0 for v in (idle_kw,off_kw,pv_threshold_kw,
             wake_margin_minutes,execution_margin_minutes,min_sleep_minutes,
-            evening_quiet_hour,minimum_phase_kwh)):
+            evening_quiet_hour,minimum_phase_kwh,target_decrease_hysteresis_soc)):
         raise ValueError('invalid night policy')
     if finite(evening_fraction) is None or not 0 < evening_fraction < 1:
         raise ValueError('evening_fraction must be between 0 and 1')
@@ -144,15 +158,16 @@ The export ceiling is shared with PV and never added on top of PV export.
     prior = previous_plan if isinstance(previous_plan, dict) else {}
     prior_date = prior.get('night_plan_date')
     same_night = prior_date == local_dawn.date().isoformat()
-    if same_night:
-        # Keep a night target stable when a fresh, pessimistic forecast arrives
-        # after sunset. A better forecast may release more headroom; a worse
-        # one cannot cancel a target already committed to the inverter.
-        locked_target = finite(prior.get('night_plan_target_soc'))
-        if locked_target is not None:
-            budget['target_soc'] = min(budget['target_soc'], max(policy.hard_floor, locked_target))
-            budget['target_energy'] = (budget['target_soc']-policy.hard_floor)*policy.kwh_per_soc
-            budget['required_headroom_kwh'] = round(max(0,policy.capacity-budget['target_energy']),3)
+    # The operational target is recomputed from every valid forecast. In
+    # particular, a worsening dawn forecast must be allowed to protect more
+    # energy; a previous target is execution history, not a safety limit.
+    # A small improvement is ignored until it is at least the configured
+    # SOC deadband below the last accepted target. Safety increases are
+    # immediate, so this cannot preserve an obsolete low reserve.
+    prior_target = finite(prior.get('night_plan_target_soc')) if same_night else None
+    if (prior_target is not None and budget['target_soc'] < prior_target
+            and prior_target-budget['target_soc'] < target_decrease_hysteresis_soc):
+        budget = _retarget_budget(day, policy, budget, prior_target)
     night = take_slots(slots,now_utc,dawn)
     energy = max(0,(soc-policy.hard_floor)*policy.kwh_per_soc)
     target = budget['target_energy']
@@ -254,6 +269,7 @@ The export ceiling is shared with PV and never added on top of PV export.
                 night_plan_date=local_dawn.date().isoformat(),
                 night_plan_target_soc=budget['target_soc'],
                 night_split_enabled=split_enabled,
+                discharge_committed=bool(discharge_committed or (phase == 'morning' and due)),
                 night_split_total_kwh=round(split_kwh,3),
                 evening_kwh=round(evening_kwh if split_enabled else 0,3),
                 morning_kwh=round(morning_kwh if split_enabled else split_kwh,3),

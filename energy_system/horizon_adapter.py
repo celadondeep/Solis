@@ -12,6 +12,23 @@ from energy_system.horizon import (
 )
 
 
+_NIGHT_MEMORY_KEYS = (
+    "night_plan_date", "night_plan_target_soc", "evening_target_soc",
+    "night_split_enabled", "evening_done", "discharge_phase",
+    "discharge_deadline", "discharge_committed", "pv_start_at", "calculated_at",
+)
+
+
+def _night_plan_memory(value):
+    """Keep only execution history needed to resume the current night."""
+    if not isinstance(value, dict):
+        return None
+    memory = {key: value[key] for key in _NIGHT_MEMORY_KEYS if key in value}
+    if not memory.get("night_plan_date") or not memory.get("pv_start_at"):
+        return None
+    return memory
+
+
 def build_horizon_mixin(profile):
     sensors, output = profile["SENSOR"], profile["OUTPUT"]
     site, label = profile["KEY"], profile["SITE_LABEL"]
@@ -58,24 +75,37 @@ def build_horizon_mixin(profile):
         def horizon_guidance(self, soc, force=False):
             now = datetime.now(ZoneInfo(profile.get("TIMEZONE", "Europe/Vilnius")))
             previous = getattr(self, "_horizon_result", None)
-            if previous is None:
+            night_previous = getattr(self, "_night_plan_state", None)
+            if previous is None or night_previous is None:
                 # AppDaemon may restart between the evening and dawn stages.
-                # Recover the last published night plan from its HA sensor so
-                # the same solar day's SOC target and phase remain latched.
+                # The night-stage memory is independent of forecast validity,
+                # so a temporary forecast error must not discard that memory.
                 try:
                     saved = self._read_state_record(output["horizon"])
                     attrs = saved.get("attributes") or {}
-                    pv_start = stamp(attrs.get("pv_start_at"))
-                    calculated = stamp(attrs.get("calculated_at"))
-                    if (attrs.get("site") == site
+                    memory = _night_plan_memory(attrs.get("night_plan_memory"))
+                    # Backward compatibility with 4.5 state written before
+                    # the independent memory attribute existed.
+                    if memory is None and attrs.get("night_active") in (True, "on", "true"):
+                        memory = _night_plan_memory(attrs)
+                    if memory is not None:
+                        pv_start = stamp(memory["pv_start_at"])
+                        calculated = stamp(memory.get("calculated_at", attrs.get("calculated_at")))
+                        age = (stamp(now)-calculated).total_seconds()
+                    else:
+                        pv_start, age = None, float("inf")
+                    if (attrs.get("site") == site and memory is not None
+                            and pv_start > stamp(now) and 0 <= age < 18*3600):
+                        night_previous = memory
+                        self._night_plan_state = memory
+                    if (previous is None and attrs.get("site") == site
                             and attrs.get("valid") in (True, "on", "true")
-                            and attrs.get("night_active") in (True, "on", "true")
-                            and pv_start > stamp(now)
-                            and (stamp(now)-calculated).total_seconds() < 18*3600):
+                            and pv_start is not None and pv_start > stamp(now)
+                            and 0 <= age < 18*3600):
                         previous = attrs
                         self._horizon_result = previous
                 except Exception:
-                    previous = None
+                    pass
             power = self._read_state_record(sensors["power_state"]).get("state")
             boundary = previous.get("wake_at") if previous else None
             crossed = bool(boundary and stamp(now) >= stamp(boundary))
@@ -99,6 +129,9 @@ def build_horizon_mixin(profile):
                               required_preexport_kwh=0, required_headroom_kwh=0,
                               standby_saved_kwh=0, dawn=None,
                               reason=f"Prognozė nepatikima; savas vartojimas be priverstinio eksporto ({str(exc)[:100]})")
+                memory = _night_plan_memory(getattr(self, "_night_plan_state", None))
+                if memory is not None:
+                    result["night_plan_memory"] = memory
                 if not previous or previous.get("valid"):
                     self.log(f"[{site}] {result['reason']}", level="WARNING")
             result.update(site=site, calculated_at=now.isoformat(),
@@ -108,6 +141,12 @@ def build_horizon_mixin(profile):
                           reserve_scope="Ryto talpos tikslas ir apsauga nuo priverstinio eksporto; nakties miegas saugo likusį įkrovimą",
                           grid_charging="Naujų įkrovimo iš tinklo komandų nėra; kaupiama PV")
             self._horizon_result = result
+            if result.get("valid") and result.get("night_active"):
+                memory = _night_plan_memory(result)
+                if memory is not None:
+                    self._night_plan_state = memory
+            if getattr(self, "_night_plan_state", None) is not None:
+                result["night_plan_memory"] = self._night_plan_state
             self._horizon_at = monotonic()
             self.last_target_soc = 100 if self.is_storm_mode() else int(result.get("target_soc", result["reserve_soc"]))
             self.set_state(output["target_soc"], state=str(self.last_target_soc), attributes={
@@ -214,12 +253,16 @@ def build_horizon_mixin(profile):
             production = (slots[0].pv >= profile["MORNING_PV_THRESHOLD_KW"] or
                 (pv_now is not None and pv_now/1000 >= profile["MORNING_PV_THRESHOLD_KW"]))
             previous = getattr(self, "_horizon_result", {})
-            deadline = previous.get("discharge_deadline")
-            committed = (previous.get("valid") in (True, "on", "true")
-                         and previous.get("night_active") in (True, "on", "true")
-                         and previous.get("export_now") in (True, "on", "true")
-                         and previous.get("discharge_phase") == "morning" and deadline is not None
-                         and stamp(now) < stamp(deadline))
+            night_previous = getattr(self, "_night_plan_state", None) or previous
+            deadline = night_previous.get("discharge_deadline")
+            committed = (night_previous.get("discharge_committed") in (True, "on", "true")
+                         and deadline is not None and stamp(now) < stamp(deadline))
+            if not committed:
+                committed = (previous.get("valid") in (True, "on", "true")
+                             and previous.get("night_active") in (True, "on", "true")
+                             and previous.get("export_now") in (True, "on", "true")
+                             and previous.get("discharge_phase") == "morning" and deadline is not None
+                             and stamp(now) < stamp(deadline))
             night_cfg = profile.get("NIGHT_DISCHARGE", {})
             night = plan_dawn(slots,now,soc,active_policy,production_on=production,
                 power_control=profile["INVERTER_CONTROL_AVAILABLE"],
@@ -231,10 +274,11 @@ def build_horizon_mixin(profile):
                 pv_threshold_kw=profile["MORNING_PV_THRESHOLD_KW"],
                 wake_margin_minutes=profile["MORNING_ON_MARGIN_MIN"],
                 execution_margin_minutes=profile.get("HEADROOM_EXECUTION_MINUTES", 5),
-                discharge_committed=committed, previous_plan=previous,
+                discharge_committed=committed, previous_plan=night_previous,
                 evening_fraction=night_cfg.get("EVENING_FRACTION", 0.4),
                 evening_quiet_hour=night_cfg.get("QUIET_HOUR", 23.0),
-                minimum_phase_kwh=night_cfg.get("MINIMUM_PHASE_KWH", 1.0))
+                minimum_phase_kwh=night_cfg.get("MINIMUM_PHASE_KWH", 1.0),
+                target_decrease_hysteresis_soc=night_cfg.get("TARGET_DECREASE_HYSTERESIS_SOC", 2.0))
             result.update(night_active=False,inverter_on=True,dawn=night,
                           solar_export_priority=False, soc_buffer_active=False,
                           predictive_buffer_due=False, buffer_required_kwh=0,
