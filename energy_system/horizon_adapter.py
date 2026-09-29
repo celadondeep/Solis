@@ -58,6 +58,24 @@ def build_horizon_mixin(profile):
         def horizon_guidance(self, soc, force=False):
             now = datetime.now(ZoneInfo(profile.get("TIMEZONE", "Europe/Vilnius")))
             previous = getattr(self, "_horizon_result", None)
+            if previous is None:
+                # AppDaemon may restart between the evening and dawn stages.
+                # Recover the last published night plan from its HA sensor so
+                # the same solar day's SOC target and phase remain latched.
+                try:
+                    saved = self._read_state_record(output["horizon"])
+                    attrs = saved.get("attributes") or {}
+                    pv_start = stamp(attrs.get("pv_start_at"))
+                    calculated = stamp(attrs.get("calculated_at"))
+                    if (attrs.get("site") == site
+                            and attrs.get("valid") in (True, "on", "true")
+                            and attrs.get("night_active") in (True, "on", "true")
+                            and pv_start > stamp(now)
+                            and (stamp(now)-calculated).total_seconds() < 18*3600):
+                        previous = attrs
+                        self._horizon_result = previous
+                except Exception:
+                    previous = None
             power = self._read_state_record(sensors["power_state"]).get("state")
             boundary = previous.get("wake_at") if previous else None
             crossed = bool(boundary and stamp(now) >= stamp(boundary))
@@ -197,9 +215,12 @@ def build_horizon_mixin(profile):
                 (pv_now is not None and pv_now/1000 >= profile["MORNING_PV_THRESHOLD_KW"]))
             previous = getattr(self, "_horizon_result", {})
             deadline = previous.get("discharge_deadline")
-            committed = (previous.get("valid") is True and previous.get("night_active") is True
-                         and previous.get("export_now") is True and deadline is not None
+            committed = (previous.get("valid") in (True, "on", "true")
+                         and previous.get("night_active") in (True, "on", "true")
+                         and previous.get("export_now") in (True, "on", "true")
+                         and previous.get("discharge_phase") == "morning" and deadline is not None
                          and stamp(now) < stamp(deadline))
+            night_cfg = profile.get("NIGHT_DISCHARGE", {})
             night = plan_dawn(slots,now,soc,active_policy,production_on=production,
                 power_control=profile["INVERTER_CONTROL_AVAILABLE"],
                 power_on=self._read_state_record(sensors["power_state"]).get("state") != "off",
@@ -210,7 +231,10 @@ def build_horizon_mixin(profile):
                 pv_threshold_kw=profile["MORNING_PV_THRESHOLD_KW"],
                 wake_margin_minutes=profile["MORNING_ON_MARGIN_MIN"],
                 execution_margin_minutes=profile.get("HEADROOM_EXECUTION_MINUTES", 5),
-                discharge_committed=committed)
+                discharge_committed=committed, previous_plan=previous,
+                evening_fraction=night_cfg.get("EVENING_FRACTION", 0.4),
+                evening_quiet_hour=night_cfg.get("QUIET_HOUR", 23.0),
+                minimum_phase_kwh=night_cfg.get("MINIMUM_PHASE_KWH", 1.0))
             result.update(night_active=False,inverter_on=True,dawn=night,
                           solar_export_priority=False, soc_buffer_active=False,
                           predictive_buffer_due=False, buffer_required_kwh=0,
