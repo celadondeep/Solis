@@ -262,10 +262,51 @@ def build_forecast_mixin(profile):
             self.correction["factor"] = round(new, 4)
             self.correction["days"]   = self.correction.get("days", 0) + 1
             self.update_hourly_factors()
+            self.record_forecast_accuracy(actual)
             self.save_correction()
 
             self.log(f"[KOREKCIJA] Faktas {actual:.1f} / prognozė {forecast:.1f} "
                      f"= {ratio:.2f} → koeficientas {old:.3f} → {new:.3f}")
+
+        def record_forecast_accuracy(self, actual):
+            """Compare production with the frozen morning forecast, never a revised evening value."""
+            entity = OUTPUT.get("forecast_accuracy")
+            if not entity:
+                return
+            today = datetime.now().astimezone().date().isoformat()
+            snapshot = self.correction.get("snapshot") or {}
+            periods = snapshot.get("periods") if snapshot.get("date") == today else None
+            if not isinstance(periods, dict) or len(periods) < 20:
+                self.log(f"[{profile['KEY']}] Tikslumo įrašas praleistas: nėra rytinio snapshot", level="WARNING")
+                return
+            try:
+                forecast = sum(float(v) * 0.5 for v in periods.values())
+            except (ValueError, TypeError):
+                return
+            if forecast < 1 or actual <= 0:
+                return
+            self.correction["last_accuracy"] = {
+                "date": today, "percent": round(actual / forecast * 100, 1),
+                "actual_kwh": round(actual, 2), "forecast_kwh": round(forecast, 2),
+            }
+            self.publish_forecast_accuracy()
+
+        def publish_forecast_accuracy(self):
+            entity = OUTPUT.get("forecast_accuracy")
+            result = self.correction.get("last_accuracy")
+            if not entity or not isinstance(result, dict) or not result.get("date"):
+                return
+            try:
+                value = float(result["percent"])
+            except (KeyError, TypeError, ValueError):
+                return
+            self.set_state(entity, state=str(value), attributes={
+                "friendly_name": f"{profile['SITE_LABEL']}: vakarykštės prognozės tikslumas",
+                "unit_of_measurement": "%", "state_class": "measurement",
+                "forecast_date": result["date"],
+                "actual_kwh": result.get("actual_kwh"),
+                "forecast_kwh": result.get("forecast_kwh"),
+            })
 
         # ============================================================
         #  INVERTERIO NAKTIES EKONOMIKA
