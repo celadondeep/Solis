@@ -307,6 +307,10 @@
     "title": "Namai SE",
     "file": "energijos_valdymas.yaml",
     "site_label": "Namai",
+    "sun": {
+      "$ref": "energy.SENSOR.sun"
+    },
+    "weather": "weather.forecast_namai",
     "soc": {
       "$ref": "energy.SENSOR.soc"
     },

@@ -284,6 +284,9 @@
     "title": "Eimo SE",
     "file": "eimo.yaml",
     "site_label": "Eimo",
+    "sun": {
+      "$ref": "energy.SENSOR.sun"
+    },
     "soc": {
       "$ref": "energy.SENSOR.soc"
     },
