@@ -18,7 +18,6 @@ PANEL_CSS = """
 .se .dot{width:7px;height:7px;border-radius:50%;background:#159b85;flex-shrink:0}.se .warn{background:#d99a18}.se .bad{background:#d96b57}
 .se .flow{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:18px}.se .node{padding:13px 14px;border:1px solid var(--divider-color);border-radius:14px;min-width:0}
 .se .node-head{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--secondary-text-color)}.se ha-icon{--mdc-icon-size:19px;width:19px;height:19px}.se .value{font-size:27px;line-height:1.2;font-weight:600;letter-spacing:-.7px;font-variant-numeric:tabular-nums;margin:6px 0 2px}.se .unit{font-size:13px;font-weight:400;letter-spacing:0}
-.se .bat-motion{animation:se-battery-pulse 1.8s ease-in-out infinite}.se .bat-discharge{color:#d99a18!important}@keyframes se-battery-pulse{50%{opacity:.4}}@media(prefers-reduced-motion:reduce){.se .bat-motion{animation:none}}
 .se .battery{margin-top:20px}.se .battery-value{font-size:19px;font-weight:600;font-variant-numeric:tabular-nums}.se .track{height:7px;margin-top:10px;border-radius:10px;background:var(--secondary-background-color);overflow:hidden}.se .fill{height:100%;border-radius:10px;background:#159b85}
 .se .steps{margin-top:18px;border-left:2px solid var(--divider-color);margin-left:5px;padding-left:17px}.se .step{position:relative;display:grid;grid-template-columns:66px 1fr;gap:9px;padding:0 0 16px}.se .step:last-child{padding-bottom:0}.se .step:before{position:absolute;left:-23px;top:7px;content:'';width:8px;height:8px;border-radius:50%;background:#159b85;border:2px solid var(--ha-card-background,var(--card-background-color));box-sizing:content-box}.se .time{font-size:17px;font-weight:650;line-height:1.35;font-variant-numeric:tabular-nums}.se .step-title{font-size:13px;font-weight:600}
 .se .rows{margin-top:15px}.se .row{display:flex;justify-content:space-between;gap:16px;border-top:1px solid var(--divider-color);padding:10px 0;font-size:13px}.se .row:last-child{padding-bottom:0}.se .row span:first-child{color:var(--secondary-text-color)}.se .row strong{text-align:right;font-weight:550;font-variant-numeric:tabular-nums}
@@ -77,15 +76,44 @@ if(variables.kind === 'flow') {
   const batteryIcon=level===null?'mdi:battery-unknown':b!==null&&b < -20
     ? (level===0?'mdi:battery-charging-outline':'mdi:battery-charging-'+level)
     : level===100?'mdi:battery':level===0?'mdi:battery-outline':'mdi:battery-'+level;
-  const batteryMotion=b!==null&&Math.abs(b)>20?'bat-motion'+(b>20?' bat-discharge':''):'';
+  const charging=b!==null&&b < -20;
+  const exporting=g!==null&&g < -20, importing=g!==null&&g > 20;
+  const gridIcon=importing?'mdi:home-import-outline':exporting?'mdi:home-export-outline':'mdi:transmission-tower';
+  const solarSun=a(p.sun), elevation=num(solarSun.elevation);
+  const weatherRecord=states[p.weather], weatherAge=ts(weatherRecord?.last_updated);
+  const weatherOK=weatherRecord && weatherAge!==null && now-weatherAge>=-60000 && now-weatherAge<3*3600000;
+  const condition=weatherOK?String(weatherRecord.state||''):'';
+  const cloud=weatherOK?num(weatherRecord.attributes?.cloud_coverage):null;
+  const phase=elevation!==null&&elevation<=-6?'night':elevation!==null&&elevation<8?'twilight':'day';
+  let solar;
+  if(phase==='night') solar={icon:condition==='partlycloudy'?'mdi:weather-night-partly-cloudy':'mdi:weather-night',sub:'Naktis',phase};
+  else if(phase==='twilight') solar={icon:solarSun.rising?'mdi:weather-sunset-up':'mdi:weather-sunset-down',sub:solarSun.rising?'Saulėtekis':'Saulėlydis',phase};
+  else if(p.power&&s(p.power)==='off') solar={icon:'mdi:solar-panel',sub:'Inverteris išjungtas',phase};
+  else if(condition==='rainy'||condition==='pouring'||condition==='lightning-rainy') solar={icon:condition==='lightning-rainy'?'mdi:weather-lightning-rainy':'mdi:weather-rainy',sub:'Lietus · pagal orų duomenis',phase};
+  else if(condition==='snowy'||condition==='snowy-rainy') solar={icon:'mdi:weather-snowy',sub:'Sniegas · pagal orų duomenis',phase};
+  else if(condition==='fog') solar={icon:'mdi:weather-fog',sub:'Rūkas · pagal orų duomenis',phase};
+  else if(weatherOK) {
+    const cover=cloud===null?(condition==='sunny'?0:condition==='partlycloudy'?50:90):cloud;
+    solar=cover<15?{icon:'mdi:weather-sunny',sub:'Giedra',phase}:cover<40?
+      {icon:'mdi:weather-partly-cloudy',sub:'Mažai debesų',phase}:cover<75?
+      {icon:'mdi:weather-partly-cloudy',sub:'Debesuota su pragiedruliais',phase}:cover<90?
+      {icon:'mdi:weather-cloudy',sub:'Debesuota',phase}:{icon:'mdi:cloud',sub:'Labai debesuota',phase};
+  } else if(pv===null) solar={icon:'mdi:solar-power',sub:'Orai nežinomi',phase};
+  else solar=pv<100?{icon:'mdi:weather-cloudy',sub:'Maža gamyba · pagal galią',phase}:pv<700?
+      {icon:'mdi:weather-partly-cloudy',sub:'Nedidelė gamyba · pagal galią',phase}:pv<2500?
+      {icon:'mdi:weather-partly-cloudy',sub:'Gamina · pagal galią',phase}:
+      {icon:'mdi:weather-sunny',sub:'Stipri gamyba · pagal galią',phase};
+  const previousSolar=this._seSolarVisual;
+  if(previousSolar&&previousSolar.phase===solar.phase&&now-previousSolar.at<600000) solar=previousSolar;
+  else this._seSolarVisual={...solar,at:now};
   const field=health.fields?.pv_power || health.fields?.soc || {};
   const report=hb ?? ts(field.reported_at), age=report===null ? null : Math.max(0,Math.floor((now-report)/1000));
   const ageText=age===null ? 'Laikas nežinomas' : age<60 ? `prieš ${age} s` : `prieš ${Math.floor(age/60)} min`;
   body=title('Momentinė galia','Kur keliauja energija')+`<div class="flow">`+
-    node('Saulė',pv,pv===null?'Nėra šviežių duomenų':pv>20?'Gamina':'Negamina','mdi:weather-sunny','#d99a18')+
+    node('Saulė',pv,pv===null?'Nėra šviežių duomenų':solar.sub,solar.icon,'#d99a18')+
     node('Vartojimas',load,load===null?'Nėra šviežių duomenų':'Dabartinis vartojimas','mdi:home-lightning-bolt-outline','#4789e8')+
-    node('Baterija',b,b===null?'Nėra šviežių duomenų':b < -20?'← Kraunasi':b>20?'→ Iškrauna':'Ramybė',batteryIcon,'#159b85',batteryMotion)+
-    node('Tinklas',g,g===null?'Nėra šviežių duomenų':g>20?'← Imama iš tinklo':g< -20?'→ Atiduodama į tinklą':'Beveik subalansuota','mdi:transmission-tower','#8973cf')+`</div>`+
+    node('Baterija',b,b===null?'Nėra šviežių duomenų':charging?'← Kraunasi':b>20?'→ Iškrauna':'Ramybė',batteryIcon,'#159b85')+
+    node('Tinklas',g,g===null?'Nėra šviežių duomenų':importing?'← Imama iš tinklo':exporting?'→ Atiduodama į tinklą':'Beveik subalansuota',gridIcon,'#8973cf')+`</div>`+
     `<div class="battery"><div class="top"><span class="muted">Baterijos įkrova</span><span class="battery-value">${fmt(soc,0)} %</span></div><div class="track"><div class="fill" style="width:${soc===null?0:Math.max(0,Math.min(100,soc))}%"></div></div></div>`+
     `<div class="foot muted">${teleFresh ? 'Matavimai' : 'Duomenys vėluoja'} · ${esc(ageText)}${p.power ? ' · Inverteris '+(s(p.power)==='off'?'išjungtas':s(p.power)==='on'?'įjungtas':'nežinoma') : ' · SolisCloud'}</div>`;
 }
@@ -117,7 +145,7 @@ if(variables.kind === 'plan') {
     if(ts(h.morning_actual_end_at)) scheduled.push([h.morning_actual_end_at,'Rytinis iškrovimas išjungtas','Faktinis laikas']);
     scheduled.sort((x,y)=>(ts(x[0])??Infinity)-(ts(y[0])??Infinity)).forEach(x=>{body+=step(clock(x[0]),x[1],x[2]);});
     body+=step(clock(h.pv_start_at),'Prasideda prognozuojama gamyba',`Baterijos viršutinė ryto riba ${fmt(h.target_soc,0)} %`);
-    body+='</div><div class="rows">'+row('Reikiama laisva vieta',fmt(h.required_headroom_kwh)+' kWh')+row('Jau sutaupyta išjungus inverterį',fmt(h.sleep_saved_actual_kwh,3)+' kWh')+row('Dar galima sutaupyti',fmt(h.standby_saved_kwh,2)+' kWh')+'</div>';
+    body+='</div><div class="rows">'+row('Reikiama laisva vieta',fmt(h.required_headroom_kwh)+' kWh')+row('Sutaupyta išjungus inverterį',fmt(h.sleep_saved_actual_kwh,3)+' kWh')+'</div>';
     if(num(h.unmet_headroom_kwh)>0.05) body+=`<div class="callout">Iki gamybos pradžios gali nepavykti atlaisvinti dar ${fmt(h.unmet_headroom_kwh)} kWh.</div>`;
     body+='<div class="foot muted">Ryto riba nereiškia, kad mažesnę įkrovą reikia papildyti iš tinklo.</div>';
   } else {
@@ -127,7 +155,7 @@ if(variables.kind === 'plan') {
     body+=`<p class="desc">${description}</p>`;
     body+='<div class="rows">'+row('Eksporto riba',fmt(h.model_export_limit_kw)+' kW')+row('Priverstinis iškrovimas',on(plan.slot_active)?'Aktyvus':'Išjungtas')+row('Plano SOC riba',fmt(plan.target_soc,0)+' %')+'</div>';
     body+='<div class="callout">Kitas nakties planas bus parodytas, kai modelis pereis į pasiruošimą rytui. Praėjusios nakties laikai nerodomi.</div>';
-    if(num(h.sleep_saved_actual_kwh)>0) body+='<div class="rows">'+row('Praėjusią naktį sutaupyta išjungus inverterį',fmt(h.sleep_saved_actual_kwh,3)+' kWh')+'</div>';
+    if(num(h.sleep_saved_actual_kwh)>0) body+='<div class="rows">'+row('Sutaupyta išjungus inverterį',fmt(h.sleep_saved_actual_kwh,3)+' kWh')+'</div>';
     body+=`<div class="foot muted">Planas atnaujintas ${esc(clock(plan.committed_at))}. Koreguojamas pagal gamybą ir vartojimą.</div>`;
   }
 }
@@ -215,12 +243,12 @@ def button_templates():
               return new Intl.NumberFormat(variables.locale || 'lt-LT',{maximumFractionDigits:variables.decimals ?? 1}).format(n)+' '+(variables.unit ?? entity?.attributes?.unit_of_measurement ?? '');
             ]]]""",
             "styles": {
-                "card": [{"padding": "16px"}, {"border-radius": "16px"}, {"box-shadow": "none"}],
-                "grid": [{"grid-template-areas": '"i n" "s s"'}, {"grid-template-columns": "24px 1fr"}, {"row-gap": "12px"}],
-                "img_cell": [{"justify-self": "start"}, {"width": "20px"}],
+                "card": [{"padding": "14px"}, {"border-radius": "16px"}, {"box-shadow": "none"}, {"overflow": "hidden"}],
+                "grid": [{"grid-template-areas": '"i n" "s s"'}, {"grid-template-columns": "24px minmax(0, 1fr)"}, {"row-gap": "8px"}, {"min-width": "0"}],
+                "img_cell": [{"justify-self": "start"}, {"width": "20px"}, {"z-index": "1"}],
                 "icon": [{"width": "20px"}, {"color": "[[[ return variables.color || 'var(--primary-color)'; ]]]"}],
-                "name": [{"justify-self": "start"}, {"text-align": "left"}, {"font-size": "12px"}, {"color": "var(--secondary-text-color)"}, {"white-space": "normal"}],
-                "state": [{"justify-self": "start"}, {"font-size": "25px"}, {"font-weight": "550"}, {"font-variant-numeric": "tabular-nums"}],
+                "name": [{"justify-self": "start"}, {"text-align": "left"}, {"font-size": "12px"}, {"line-height": "1.25"}, {"min-width": "0"}, {"max-width": "100%"}, {"overflow-wrap": "anywhere"}, {"color": "var(--secondary-text-color)"}, {"white-space": "normal"}],
+                "state": [{"justify-self": "start"}, {"text-align": "left"}, {"min-width": "0"}, {"max-width": "100%"}, {"white-space": "normal"}, {"overflow-wrap": "anywhere"}, {"line-height": "1.1"}, {"font-size": "clamp(17px, 2.2vw, 24px)"}, {"font-weight": "550"}, {"font-variant-numeric": "tabular-nums"}],
             },
         },
     }
@@ -229,7 +257,7 @@ def button_templates():
 def _panel(p, kind):
     keys = ("site_label", "pv", "load", "grid", "battery", "soc", "plan", "telemetry", "executor", "storm", "manual", "manual_soc", "consumption_profile", "cons_tomorrow")
     cfg = {k: p.get(k) for k in keys}
-    cfg.update({k: p.get(k) for k in ("horizon", "power", "heartbeat", "heartbeat_max_age", "grid_sign", "battery_sign", "url", "locale", "timezone", "finance")})
+    cfg.update({k: p.get(k) for k in ("horizon", "power", "heartbeat", "heartbeat_max_age", "grid_sign", "battery_sign", "sun", "weather", "url", "locale", "timezone", "finance")})
     cfg["quality"] = p["analysis"]["quality"]
     return {"type": "custom:button-card", "template": "se_panel", "update_timer": "5s" if kind == "flow" else "15s",
             "variables": {"plant": cfg, "kind": kind}, "grid_options": {"columns": "full", "rows": "auto"}}
@@ -368,8 +396,8 @@ def build_views(p, legacy):
         _section(_history(p), span=2, visible=t["graphs"]),
         _section(_panel(p, "forecast"), visible=t["forecast"]),
         _section(_heading("ESO pasaugojimo bankas", "mdi:bank-outline"),
-                 _metric(e["bank"], "Dabartinis likutis", "mdi:bank-outline", COLORS["battery"]),
-                 _metric(e["bank_value"], "Likučio vertė", "mdi:cash", COLORS["battery"], decimals=0),
+                 _metric(e["bank"], "Dabartinis likutis", "mdi:bank-outline", COLORS["battery"], columns=12),
+                 _metric(e["bank_value"], "Likučio vertė", "mdi:cash", COLORS["battery"], decimals=0, columns=12),
                  _note("Likutis apima einamojo laikotarpio srautus. Oficialūs uždarytų mėnesių duomenys — „Vartojime“.")),
         _preferences(p),
         _section(_heading("Rankinės parinktys", "mdi:tune"), _entities("Šios elektrinės valdymas", [
