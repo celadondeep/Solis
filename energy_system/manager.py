@@ -96,6 +96,7 @@ def build_energy_manager(profile):
                 )
             self.last_target_soc = self.load_target_soc()
             self.correction = self.load_correction()
+            self.publish_forecast_accuracy()
             self.plan_policy = PlannerPolicy(
                 hard_floor=PLAN_HARD_FLOOR,
                 night_rest_soc=profile["NIGHT_REST_SOC"],
